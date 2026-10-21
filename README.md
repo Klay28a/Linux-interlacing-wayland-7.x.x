@@ -26,5 +26,10 @@ This is for Arch based distros and it will patch the graphics drivers from amd, 
 
 https://github.com/D0023R/linux_kernel_15khz
 
+-----------------------------------------------------------------------
 
+**install-linux-cru.sh**
 
+This installs a basic version of the CRU software but for wayland linux. It can pretty much just make detailed resolutions but it formats interlaced resolutions properly in linux. I found that using CRU with wine, it was creating them like this: 2048x768 I @320hz so i believe it was adding the interlace flag to the already formatted interlace res and then it ends up doubling the vertical refreshrate. This app formats it with the full size of 2048x1536 and then applies the interlace flag. I don't entirely get it but after modifying the vertical resolution it and refresh rate it showed up in in the settings.
+ 
+<img width="2661" height="1580" alt="image" src="https://github.com/user-attachments/assets/a2a494d6-c874-46bb-8cda-1cb72e295ca2" />
