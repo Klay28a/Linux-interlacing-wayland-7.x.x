@@ -85,7 +85,7 @@ https://github.com/D0023R/linux_kernel_15khz
 This script installs **Linux CRU (`linux-cru`)** and adds an application shortcut. Intended to be a linux alternative to Toastyx's CRU.
 
 **Linux Full-Frame Interlaced Formatting:** Using Windows CRU through Wine exports interlaced resolutions with halved vertical lines (e.g. `2048x768i @ 320Hz`), because Linux DRM expects the full vertical resolution (`2048x1536i @ 160Hz`) with the interlace flag. `linux-cru` formats interlaced resolutions using full-frame vertical lines so they show up with the correct resolution and refresh rate in Linux Display Settings (and auto-converts Windows CRU `.bin` files on import).
-- **Port & Profile Selection:** Lets you pick any video port (`VGA-1`, `DVI-I-1`, `DP-1`, `HDMI-A-1`, etc.) and switch between the `Installed Custom EDID`, `Current Monitor EDID` (pulled straight from the display), or saved `.bin` profiles.
+- **Port & Profile Selection:** Should be able to create new profiles to switch. Two defaults should be the /usr/lib/firmware/edid/edid.bin file and the other should be the active DRM EDID. So if you haven't applied the changes yet they should be different.
 - **Apply Live or Install to Bootloader:** Can reload new EDID changes live into the kernel without rebooting (**Apply Live**), or write the EDID to firmware, update your bootloader `CMDLINE`, and rebuild initramfs directly from the app, If the app freezes just wait and you will get a pop-up saying it was completed.
 
 **Usage:**
