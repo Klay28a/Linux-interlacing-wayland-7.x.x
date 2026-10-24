@@ -1,6 +1,6 @@
 # Linux-interlacing-wayland-7.x.x
 
-I used AI to create these scripts to get interlacing working on Linux Wayland. I am not an experienced scripter or coder — use these at your own risk.
+I used AI to automate the processes that I have been doing for EDID configurations and installing the 15khz patches for monitor interlacing. I am not an experienced coder or scripter. **_USE THESE AT YOUR OWN RISK_**.
 
 ### Getting Started (Download the Scripts)
 
