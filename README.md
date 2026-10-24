@@ -6,8 +6,9 @@ I used AI to create these scripts to get interlacing working on Linux Wayland. I
 
 **setup-interlace-env.sh**
 
-*Compatibility: Arch / CachyOS, Debian / Ubuntu, Fedora, openSUSE.*  
-*Affects: `/usr/lib/firmware/edid/`, initramfs config (`mkinitcpio`, `dracut`, or `initramfs-tools`), and bootloader `CMDLINE` configs (**Limine** or **GRUB**).*
+***Compatibility**: Arch / CachyOS, Debian / Ubuntu, Fedora, openSUSE.*  
+
+***Affects**: `/usr/lib/firmware/edid/`, initramfs config (`mkinitcpio`, `dracut`, or `initramfs-tools`), and bootloader `CMDLINE` configs (**Limine** or **GRUB**).*
 
 This script sets up your custom EDID file and configures your bootloader to load it on startup.
 
@@ -29,8 +30,9 @@ KERNEL_CMDLINE[default]+="quiet nowatchdog splash rw rootflags=subvol=/@ root=UU
 
 **fix-interlaced-kernel.sh**
 
-*Compatibility: Arch Linux / CachyOS (`pacman` / `makepkg`).*  
-*Affects: Linux kernel (`linux-cachyos`), kernel GPU drivers (`amdgpu`, `radeon`, `i915`, `nouveau`), and GPU module/Wayland config files (`/etc/modprobe.d/`, `~/.config/environment.d/`).*
+***Compatibility**: Arch Linux / CachyOS (`pacman` / `makepkg`).*  
+
+***Affects**: Linux kernel (`linux-cachyos`), kernel GPU drivers (`amdgpu`, `radeon`, `i915`, `nouveau`), and GPU module/Wayland config files (`/etc/modprobe.d/`, `~/.config/environment.d/`).*
 
 This script pulls the latest CachyOS kernel (`7.x.x`) and compiles it with the 15kHz and interlace patches from `D0023R/linux_kernel_15khz` for GPUs capable of interlacing. Run this whenever a kernel update overwrites your patched kernel and causes your interlaced resolutions to disappear.
 
@@ -46,8 +48,9 @@ https://github.com/D0023R/linux_kernel_15khz
 
 **install-linux-cru.sh**
 
-*Compatibility: Arch / CachyOS, Debian / Ubuntu, Fedora, openSUSE.*  
-*Affects: Installs `/usr/local/bin/linux-cru` and a Start Menu shortcut (`~/.local/share/applications/linux-cru.desktop`). Using the app's install/apply buttons affects `/usr/lib/firmware/edid/`, live DRM EDID state, and bootloader/initramfs configs.*
+***Compatibility**: Arch / CachyOS, Debian / Ubuntu, Fedora, openSUSE.*  
+
+***Affects**: Installs `/usr/local/bin/linux-cru` and a Start Menu shortcut (`~/.local/share/applications/linux-cru.desktop`). Using the app's install/apply buttons affects `/usr/lib/firmware/edid/`, live DRM EDID state, and bootloader/initramfs configs.*
 
 This script installs **Linux CRU (`linux-cru`)**, a native Linux version of ToastyX CRU built for Wayland/DRM.
 
