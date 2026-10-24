@@ -8,7 +8,7 @@ Open a terminal and run these commands to download the repo, enter the folder wi
 
 ```bash
 git clone https://github.com/Klay28a/Linux-interlacing-wayland-7.x.x.git
-cd Linux-interlacing-wayland-7.x.x/Linux-interlacing-wayland-7.x.x
+cd Linux-interlacing-wayland-7.x.x
 chmod +x *.sh
 ```
 
