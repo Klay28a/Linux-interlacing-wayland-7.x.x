@@ -1,6 +1,6 @@
 # Linux-interlacing-wayland-7.x.x
 
-I used AI to create these scripts to get interlacing working on Linux Wayland. I am not an experienced scripter or coder — use these at your own risk.
+I used AI to automate the processes that I have been doing for EDID configurations and installing the 15khz patches for monitor interlacing. I am not an experienced coder or scripter. **_USE THESE AT YOUR OWN RISK_**.
 
 -----------------------------------------------------------------------
 
@@ -50,9 +50,7 @@ https://github.com/D0023R/linux_kernel_15khz
 
 ***Compatibility**: Arch / CachyOS, Debian / Ubuntu, Fedora, openSUSE.*  
 
-***Affects**: Installs `/usr/local/bin/linux-cru` and a Start Menu shortcut (`~/.local/share/applications/linux-cru.desktop`). Using the app's install/apply buttons affects `/usr/lib/firmware/edid/`, live DRM EDID state, and bootloader/initramfs configs.*
-
-This script installs **Linux CRU (`linux-cru`)**, a native Linux version of ToastyX CRU built for Wayland/DRM.
+This script installs **Linux CRU (`linux-cru`)** and creates an application manager shortcut, intended to be a Toastyx CRU linux alternative. 
 
 - **Linux Full-Frame Interlaced Formatting:** Using Windows CRU through Wine exports interlaced resolutions with halved vertical lines (e.g. `2048x768i @ 320Hz`), because Linux DRM expects the full vertical resolution (`2048x1536i @ 160Hz`) with the interlace flag. `linux-cru` formats interlaced resolutions using full-frame vertical lines so they show up with the correct resolution and refresh rate in Linux Display Settings (and auto-converts Windows CRU `.bin` files on import).
 - **Port & Profile Selection:** Lets you pick any video port (`VGA-1`, `DVI-I-1`, `DP-1`, `HDMI-A-1`, etc.) and switch between the `Installed Custom EDID`, `Current Monitor EDID` (pulled straight from the display), or saved `.bin` profiles.
