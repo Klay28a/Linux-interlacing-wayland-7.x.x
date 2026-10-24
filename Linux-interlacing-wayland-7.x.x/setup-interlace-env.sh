@@ -1,66 +1,151 @@
 #!/usr/bin/env bash
-# Universal Linux CRT Interlace Environment Setup
-# Supports: Limine, GRUB, systemd-boot | mkinitcpio, dracut, initramfs-tools
+# Script 1: Standalone CRT Interlace & Multi-GPU Environment Setup
+# Works standalone or alongside linux-cru without requiring linux-cru.
+# Supports: Limine, GRUB | mkinitcpio, dracut, initramfs-tools
+# Usage: ./setup-interlace-env.sh [edid_source_path] [connector_name|auto]
 set -euo pipefail
 umask 022
 
-EDID_SRC="${1:-/usr/lib/firmware/edid/crufile.bin}"
+if [ "$(id -u)" -eq 0 ]; then
+    echo "ERROR: Please run this script as your normal user (it will prompt via sudo when needed)." >&2
+    exit 1
+fi
+
+USER_EDID_SRC="${1:-}"
 USER_CONN="${2:-auto}"
-EDID_NAME="crufile.bin"
-EDID_DEST="/usr/lib/firmware/edid/${EDID_NAME}"
 
 TMP_EDID="$(mktemp)"
-trap 'rm -f "$TMP_EDID"' EXIT
+TMP_CFG="$(mktemp)"
+trap 'rm -f "$TMP_EDID" "$TMP_CFG"' EXIT
 
-# 1. Auto-detect connected analog DRM connector (VGA-* or DVI-I-*) if not specified
+# 1. Auto-detect analog connector (VGA-* or DVI-I-*) or use user-specified connector
 if [ "$USER_CONN" = "auto" ]; then
     DETECTED_CONN=""
     for status_file in /sys/class/drm/card*-*/status; do
         [ -e "$status_file" ] || continue
-        port_dir="$(dirname "$status_file")"
-        port_name="$(basename "$port_dir")"
-        short_name="${port_name#card*-}"
+        short_name="$(basename "$(dirname "$status_file")")"
+        short_name="${short_name#card*-}"
         if [[ "$short_name" == VGA-* || "$short_name" == DVI-I-* ]]; then
-            if [ "$(cat "$status_file")" = "connected" ]; then
+            if [ "$(cat "$status_file" 2>/dev/null || true)" = "connected" ]; then
                 DETECTED_CONN="$short_name"
                 break
             fi
         fi
     done
+    if [ -z "$DETECTED_CONN" ]; then
+        for status_file in /sys/class/drm/card*-*/status; do
+            [ -e "$status_file" ] || continue
+            short_name="$(basename "$(dirname "$status_file")")"
+            short_name="${short_name#card*-}"
+            if [[ "$short_name" == VGA-* || "$short_name" == DVI-I-* ]]; then
+                DETECTED_CONN="$short_name"
+                break
+            fi
+        done
+    fi
     CONNECTOR="${DETECTED_CONN:-VGA-1}"
 else
     CONNECTOR="$USER_CONN"
 fi
 
-echo "==> Target DRM Connector: $CONNECTOR"
+if [ "$CONNECTOR" = "VGA-1" ]; then
+    EDID_NAME="crufile.bin"
+else
+    CONN_LOWER="$(echo "$CONNECTOR" | tr '[:upper:]' '[:lower:]')"
+    EDID_NAME="cru-${CONN_LOWER}.bin"
+fi
+EDID_DEST="/usr/lib/firmware/edid/${EDID_NAME}"
+EDID_SRC="${USER_EDID_SRC:-$EDID_DEST}"
 
-# 2. Validate & Fix CRU EDID Binary (Convert half-field height to Linux full-frame height)
-echo "==> [1/5] Validating EDID and converting interlaced DTDs to Linux full-frame height..."
-if [ ! -f "$EDID_SRC" ]; then
-    echo "ERROR: EDID file not found at: $EDID_SRC"
-    echo "Usage: $0 [/path/to/edid.bin] [VGA-1|DVI-I-1]"
-    exit 1
+echo "==> [1/5] Target DRM Connector: $CONNECTOR (Firmware target: $EDID_DEST)"
+
+# 2. Configure GPU Environment & Udev Symlinks
+echo "==> [2/5] Configuring GPU environment and Wayland cursor rules..."
+NV_PCI="$(lspci -D -nn 2>/dev/null | grep -E "VGA|3D" | grep -i "10de:" | head -n 1 | awk '{print $1}' || true)"
+AMD_COUNT="$(lspci -D -nn 2>/dev/null | grep -E "VGA|Display" | grep -ic "1002:" || true)"
+AMD_LAST_PCI="$(lspci -D -nn 2>/dev/null | grep -E "VGA|Display" | grep -i "1002:" | tail -n 1 | awk '{print $1}' || true)"
+
+mkdir -p "$HOME/.config/environment.d"
+echo "KWIN_FORCE_SW_CURSOR=1" > "$HOME/.config/environment.d/kwin-cursor.conf"
+
+if [ -n "$NV_PCI" ] && [ -n "$AMD_LAST_PCI" ]; then
+    echo "  -> Detected Dual-GPU NVIDIA ($NV_PCI) + AMD ($AMD_LAST_PCI) Reverse PRIME setup"
+    sudo mkdir -p /etc/udev/rules.d
+    cat << UDEV_EOF | sudo tee /etc/udev/rules.d/99-kwin-gpu.rules >/dev/null
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", KERNELS=="$NV_PCI", SYMLINK+="dri/primary-nvidia"
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", KERNELS=="$AMD_LAST_PCI", SYMLINK+="dri/secondary-amd"
+UDEV_EOF
+    sudo udevadm control --reload-rules && sudo udevadm trigger
+    cat << ENV_EOF > "$HOME/.config/environment.d/nvidia-prime.conf"
+KWIN_DRM_DEVICES=/dev/dri/primary-nvidia:/dev/dri/secondary-amd
+__NV_PRIME_RENDER_OFFLOAD=1
+__GLX_VENDOR_LIBRARY_NAME=nvidia
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json
+ENV_EOF
+else
+    echo "  -> Detected AMD/Single-vendor GPU setup ($AMD_COUNT AMD GPU(s)); ensuring clean environment"
+    rm -f "$HOME/.config/environment.d/nvidia-prime.conf"
+    if [ -f /etc/udev/rules.d/99-kwin-gpu.rules ]; then
+        sudo rm -f /etc/udev/rules.d/99-kwin-gpu.rules
+        sudo udevadm control --reload-rules && sudo udevadm trigger
+    fi
 fi
 
+# Force amdgpu over legacy radeon for GCN 1.0 (SI) and GCN 1.1 (CIK)
+sudo mkdir -p /etc/modprobe.d
+cat << 'MOD_EOF' | sudo tee /etc/modprobe.d/amdgpu-crt.conf >/dev/null
+options radeon si_support=0 cik_support=0
+options amdgpu si_support=1 cik_support=1
+blacklist radeon
+MOD_EOF
+
+# 3. Create or Validate Linux-Formatted EDID Binary
+echo "==> [3/5] Preparing Linux-formatted EDID at $EDID_DEST..."
 python3 - "$EDID_SRC" "$TMP_EDID" << 'PYEOF'
-import sys
+import sys, os
 
 src, dst = sys.argv[1], sys.argv[2]
-b = bytearray(open(src, "rb").read())
 
-if len(b) < 128 or b[0:8] != b'\x00\xff\xff\xff\xff\xff\xff\x00':
-    print("ERROR: Invalid EDID header! File is not a valid 128/256-byte raw EDID binary.", file=sys.stderr)
-    sys.exit(1)
+if os.path.exists(src) and os.path.getsize(src) >= 128:
+    b = bytearray(open(src, "rb").read())
+    if b[0:8] != b'\x00\xff\xff\xff\xff\xff\xff\x00':
+        print(f"ERROR: Invalid EDID header in {src}!", file=sys.stderr)
+        sys.exit(1)
+    print(f"  -> Loaded existing EDID from {src} ({len(b)} bytes).")
+else:
+    b = bytearray(128)
+    b[0:8] = b'\x00\xff\xff\xff\xff\xff\xff\x00'
+    b[8:12] = b'\x22\xf0\xd0\x09'
+    b[18], b[19], b[20], b[21], b[22], b[23], b[24] = 1, 3, 0x0E, 41, 31, 120, 0xEA
+    b[38:40] = bytes([(1600 // 8) - 31, 0x40 | (85 - 60)])
+    b[40:54] = b'\x01\x01' * 7
+    b[54:72] = bytes([
+        0x5C, 0x92, 0x00, 0xD0, 0x82, 0x00, 0x9C, 0x60,
+        0x88, 0xE0, 0x68, 0x00, 0x96, 0x31, 0x11, 0x00, 0x00, 0x9C
+    ])
+    for empty_off in (72, 90):
+        b[empty_off:empty_off+18] = bytes([0, 0, 0, 0x10, 0] + [0] * 13)
+    b[108:126] = bytes([
+        0x00, 0x00, 0x00, 0xFD, 0x00,
+        30, 200, 30, 200, 70, 0x00,
+        0x0A, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20
+    ])
+    print("  -> Generated default CRT EDID (2048x1536i @ 160Hz + 1600x1200p @ 85Hz).")
 
 for off in (54, 72, 90, 108):
+    if b[off:off+4] == b'\x00\x00\x00\xfd':
+        b[off+8] = max(b[off+8], 200)
+        b[off+9] = max(b[off+9], 70)
+        continue
     if b[off] == 0 and b[off+1] == 0:
         continue
     if b[off+17] & 0x80:
+        hact = b[off+2] | ((b[off+4] & 0xF0) << 4)
         vact = b[off+5] | ((b[off+7] & 0xF0) << 4)
         vblk = b[off+6] | ((b[off+7] & 0x0F) << 8)
         voff = ((b[off+10] >> 4) & 0x0F) | ((b[off+11] & 0x0C) << 2)
         vsyn = (b[off+10] & 0x0F) | ((b[off+11] & 0x03) << 4)
-        if vact < 1000:
+        if hact > 0 and vact <= int(hact * 0.45):
             vact, vblk = vact * 2, vblk * 2
             voff, vsyn = min(63, voff * 2), min(63, vsyn * 2)
             b[off+5] = vact & 0xFF
@@ -68,99 +153,92 @@ for off in (54, 72, 90, 108):
             b[off+7] = (((vact >> 8) & 0x0F) << 4) | ((vblk >> 8) & 0x0F)
             b[off+10] = ((voff & 0x0F) << 4) | (vsyn & 0x0F)
             b[off+11] = (b[off+11] & 0xF0) | (((voff >> 4) & 0x03) << 2) | ((vsyn >> 4) & 0x03)
-            print(f"  -> Converted DTD @{off} to Linux frame height: vactive={vact}, vblank={vblk}")
-        else:
-            print(f"  -> Verified DTD @{off} already uses Linux frame height: vactive={vact}")
+            print(f"  -> Converted Windows half-field DTD @{off} to Linux full-frame height: vactive={vact}")
 
-b[127] = (256 - (sum(b[:127]) % 256)) % 256
+if len(b) >= 256:
+    b[126] = 1
+    b[127] = (256 - (sum(b[:127]) % 256)) % 256
+    b[255] = (256 - (sum(b[128:255]) % 256)) % 256
+else:
+    b[126] = 0
+    b[127] = (256 - (sum(b[:127]) % 256)) % 256
+
 open(dst, "wb").write(b)
 PYEOF
 
 sudo mkdir -p /usr/lib/firmware/edid
 sudo install -m 0644 "$TMP_EDID" "$EDID_DEST"
 
-# 3. Ensure Pacman has no IgnorePkg locks on kernel packages (if on Arch/CachyOS)
-if [ -f /etc/pacman.conf ]; then
-    echo "==> [2/5] Ensuring /etc/pacman.conf allows normal kernel updates..."
-    sudo sed -i 's/^IgnorePkg = linux-cachyos.*/#IgnorePkg =/' /etc/pacman.conf
-fi
-
-# 4. Apply KWin Wayland Software Cursor Fix
-echo "==> [3/5] Configuring Wayland software cursor fix (~/.config/environment.d/kwin-cursor.conf)..."
-mkdir -p "$HOME/.config/environment.d"
-echo "KWIN_FORCE_SW_CURSOR=1" > "$HOME/.config/environment.d/kwin-cursor.conf"
-
-# 5. Embed EDID in Initramfs Configuration (mkinitcpio / dracut / initramfs-tools)
-echo "==> [4/5] Registering $EDID_DEST in initramfs configuration..."
+# 4. Embed EDID in Initramfs (preserving any other EDID files configured by linux-cru)
+echo "==> [4/5] Embedding $EDID_DEST in initramfs configuration..."
 if [ -f /etc/mkinitcpio.conf ]; then
-    sudo cp -a /etc/mkinitcpio.conf "/etc/mkinitcpio.conf.bak.$(date +%Y%m%d%H%M%S)"
+    [ -f /etc/mkinitcpio.conf.orig.bak ] || sudo cp -a /etc/mkinitcpio.conf /etc/mkinitcpio.conf.orig.bak
     if ! grep -Fq "$EDID_DEST" /etc/mkinitcpio.conf; then
         sudo sed -i "s|^FILES=(|FILES=($EDID_DEST |" /etc/mkinitcpio.conf
     fi
 fi
 if [ -d /etc/dracut.conf.d ]; then
-    echo "install_items+=\" $EDID_DEST \"" | sudo tee /etc/dracut.conf.d/99-crt-edid.conf >/dev/null
-fi
-if [ -d /etc/initramfs-tools/hooks ]; then
-    sudo tee /etc/initramfs-tools/hooks/crt-edid >/dev/null << HOOK_EOF
-#!/bin/sh
-PREREQ=""
-prereqs() { echo "\$PREREQ"; }
-case "\${1:-}" in prereqs) prereqs; exit 0;; esac
-. /usr/share/initramfs-tools/hook-functions
-mkdir -p "\${DESTDIR}/usr/lib/firmware/edid"
-cp -pnL "$EDID_DEST" "\${DESTDIR}/usr/lib/firmware/edid/"
-HOOK_EOF
-    sudo chmod +x /etc/initramfs-tools/hooks/crt-edid
+    DRACUT_CONF="/etc/dracut.conf.d/99-crt-edid.conf"
+    if [ ! -f "$DRACUT_CONF" ] || ! grep -Fq "$EDID_DEST" "$DRACUT_CONF"; then
+        echo "install_items+=\" $EDID_DEST \"" | sudo tee -a "$DRACUT_CONF" >/dev/null
+    fi
 fi
 
-# 6. Configure Bootloader Parameters (Limine, GRUB, or systemd-boot) & Rebuild Initramfs
-echo "==> [5/5] Updating bootloader kernel parameters and regenerating initramfs..."
-REQUIRED_ARGS="radeon.si_support=0 amdgpu.si_support=1 radeon.cik_support=0 amdgpu.cik_support=1 drm.edid_firmware=${CONNECTOR}:edid/${EDID_NAME} video=${CONNECTOR}:e"
+# 5. Update Bootloader (Limine & GRUB), Rebuild Initramfs, and Reload Live DRM
+echo "==> [5/5] Updating bootloader kernel parameters (preserving multi-port EDIDs) and rebuilding initramfs..."
 
 update_cmdline_file() {
     local file="$1"
     local key="$2"
-    sudo cp -a "$file" "${file}.bak.$(date +%Y%m%d%H%M%S)"
-    sudo python3 - "$file" "$key" "$REQUIRED_ARGS" << 'PY_BOOT'
+    [ -f "${file}.orig.bak" ] || sudo cp -a "$file" "${file}.orig.bak"
+    python3 - "$file" "$key" "$CONNECTOR" "edid/${EDID_NAME}" > "$TMP_CFG" << 'PY_BOOT'
 import sys, re
-path, key, req = sys.argv[1], sys.argv[2], sys.argv[3].split()
+
+path, key, conn, rel_fw = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 lines = open(path, "r").readlines()
 out = []
+si_args = ["radeon.si_support=0", "amdgpu.si_support=1", "radeon.cik_support=0", "amdgpu.cik_support=1"]
+
 for line in lines:
-    if line.strip().startswith(key):
-        # Clean old instances of our managed parameters
-        for prefix in ("radeon.si_support=", "amdgpu.si_support=", "radeon.cik_support=", "amdgpu.cik_support=", "drm.edid_firmware=", "video=VGA-", "video=DVI-I-"):
+    if line.lstrip().startswith(key):
+        fw_map = {}
+        for m in re.finditer(r'\bdrm\.edid_firmware=([^\s"\']+)', line):
+            for item in m.group(1).split(","):
+                if ":" in item:
+                    k, v = item.split(":", 1)
+                    fw_map[k.strip()] = v.strip()
+        fw_map[conn] = rel_fw
+        fw_arg = "drm.edid_firmware=" + ",".join(f"{k}:{v}" for k, v in fw_map.items())
+        vid_arg = f"video={conn}:e"
+
+        for prefix in ("radeon.si_support=", "amdgpu.si_support=", "radeon.cik_support=", "amdgpu.cik_support=", "drm.edid_firmware="):
             line = re.sub(r'\b' + re.escape(prefix) + r'[^\s"\']+', '', line)
+        line = re.sub(r'\bvideo=' + re.escape(conn) + r':[^\s"\']+', '', line)
         line = re.sub(r'  +', ' ', line)
-        # Append required args before the closing quote
         idx = line.rfind('"')
         if idx != -1:
-            prefix_str = line[:idx].rstrip()
-            line = f'{prefix_str} {" ".join(req)}"\n'
+            line = f'{line[:idx].rstrip()} {" ".join(si_args)} {fw_arg} {vid_arg}"\n'
     out.append(line)
-open(path, "w").writelines(out)
+
+sys.stdout.writelines(out)
 PY_BOOT
+    sudo install -m 0644 "$TMP_CFG" "$file"
 }
 
 if [ -f /etc/default/limine ]; then
-    echo "  -> Detected Limine (/etc/default/limine)"
     update_cmdline_file "/etc/default/limine" "KERNEL_CMDLINE"
+    grep "KERNEL_CMDLINE" /etc/default/limine || true
 fi
 
 if [ -f /etc/default/grub ]; then
-    echo "  -> Detected GRUB (/etc/default/grub)"
     update_cmdline_file "/etc/default/grub" "GRUB_CMDLINE_LINUX_DEFAULT"
     if command -v update-grub >/dev/null 2>&1; then
         sudo update-grub
     elif command -v grub-mkconfig >/dev/null 2>&1; then
         sudo grub-mkconfig -o /boot/grub/grub.cfg
-    elif command -v grub2-mkconfig >/dev/null 2>&1; then
-        sudo grub2-mkconfig -o /boot/grub2/grub.cfg
     fi
 fi
 
-# Rebuild initramfs using the active distro tool
 if command -v limine-mkinitcpio >/dev/null 2>&1; then
     sudo limine-mkinitcpio
 elif command -v mkinitcpio >/dev/null 2>&1; then
@@ -171,4 +249,30 @@ elif command -v update-initramfs >/dev/null 2>&1; then
     sudo update-initramfs -u -k all
 fi
 
-echo "==> Setup complete! Configured for $CONNECTOR with $EDID_DEST."
+if [ -e /sys/module/drm/parameters/edid_firmware ]; then
+    NEW_FW_PARAM="$(python3 - "$CONNECTOR" "edid/${EDID_NAME}" << 'PY_LIVE'
+import os, sys
+conn, rel = sys.argv[1], sys.argv[2]
+p = "/sys/module/drm/parameters/edid_firmware"
+fw_map = {}
+if os.path.exists(p):
+    for item in open(p).read().strip().split(","):
+        if ":" in item:
+            k, v = item.split(":", 1)
+            fw_map[k.strip()] = v.strip()
+fw_map[conn] = rel
+print(",".join(f"{k}:{v}" for k, v in fw_map.items()))
+PY_LIVE
+)"
+    echo -n "$NEW_FW_PARAM" | sudo tee /sys/module/drm/parameters/edid_firmware >/dev/null || true
+    for st in /sys/class/drm/card*-"${CONNECTOR}"/status; do
+        if [ -e "$st" ]; then
+            REPROBE_STATE="detect"
+            [[ "$CONNECTOR" == VGA-* || "$CONNECTOR" == DVI-I-* ]] && REPROBE_STATE="on"
+            sudo bash -c "echo off > '$st' && sleep 0.15 && echo '$REPROBE_STATE' > '$st'" || true
+        fi
+    done
+    sudo udevadm trigger --action=change --subsystem-match=drm || true
+fi
+
+echo "==> Environment setup complete!"
