@@ -53,8 +53,8 @@ This script installs **Linux CRU (`linux-cru`)** and adds a shortcut to your Sta
 - **Apply Live or Install to Bootloader:** Can reload new EDID changes live into the kernel without rebooting (**Apply Live**), or write the EDID to `/usr/lib/firmware/edid/`, update your Limine/GRUB `CMDLINE`, and rebuild initramfs directly from the app.
 
 <p align="center">
-  <img height="460" alt="Linux CRU Detailed Resolution" src="https://github.com/user-attachments/assets/71e6cabe-7dda-4d9b-9511-ea985bc1bb25" />
+  <img height="475" alt="Linux CRU Detailed Resolution" src="https://github.com/user-attachments/assets/71e6cabe-7dda-4d9b-9511-ea985bc1bb25" />
   &nbsp;&nbsp;
-  <img height="460" alt="Linux CRU Main Window" src="https://github.com/user-attachments/assets/0bb7ed51-2293-4027-aacc-d4b914f4a164" />
+  <img height="475" alt="Linux CRU Main Window" src="https://github.com/user-attachments/assets/0bb7ed51-2293-4027-aacc-d4b914f4a164" />
 </p>
 
