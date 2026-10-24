@@ -2,6 +2,8 @@
 
 I used AI to automate the processes that I have been doing for EDID configurations and installing the 15khz patches for monitor interlacing. I am not an experienced coder or scripter. **_USE THESE AT YOUR OWN RISK_**.
 
+These were tested on latest CachyOS, 7.3 kernels, KDE 6.8, Wayland.
+
 ### Getting Started (Download the Scripts)
 
 Open a terminal and run these commands to download the repo, enter the folder with the scripts, and make them executable:
@@ -17,6 +19,7 @@ chmod +x *.sh
 **setup-interlace-env.sh**
 
 *Compatibility: Arch / CachyOS, Debian / Ubuntu, Fedora, openSUSE.*  
+
 *Affects: `/usr/lib/firmware/edid/`, initramfs config (`mkinitcpio`, `dracut`, or `initramfs-tools`), and bootloader `CMDLINE` configs (**Limine** or **GRUB**).*
 
 This script sets up your custom EDID file and configures your bootloader to load it on startup.
@@ -53,12 +56,13 @@ KERNEL_CMDLINE[default]+="quiet nowatchdog splash rw rootflags=subvol=/@ root=UU
 **fix-interlaced-kernel.sh**
 
 *Compatibility: Arch Linux / CachyOS (`pacman` / `makepkg`).*  
+
 *Affects: Linux kernel (`linux-cachyos`), kernel GPU drivers (`amdgpu`, `radeon`, `i915`, `nouveau`), and GPU module/Wayland config files (`/etc/modprobe.d/`, `~/.config/environment.d/`).*
 
 This script pulls the latest CachyOS kernel (`7.x.x`) and compiles it with the 15kHz and interlace patches from `D0023R/linux_kernel_15khz` for GPUs capable of interlacing. Run this whenever a kernel update overwrites your patched kernel and causes your interlaced resolutions to disappear.
 
 - Pulls the latest `linux-cachyos` `PKGBUILD` and applies the 15kHz/interlace patches (`01`–`05`, `07`–`09`) so the kernel and GPU drivers allow interlaced modes.
-- Configures older GCN 1.0/1.1 AMD cards to use `amdgpu` instead of `radeon`, sets up multi-GPU Wayland rules if needed, and enables `nvidia-open` if installed.
+- The 15khz patches will affect amd, nvidia, and intel graphics drivers.
 - Compiles and installs the patched kernel.
 
 **Usage:**
@@ -77,17 +81,16 @@ https://github.com/D0023R/linux_kernel_15khz
 **install-linux-cru.sh**
 
 *Compatibility: Arch / CachyOS, Debian / Ubuntu, Fedora, openSUSE.*  
-*Affects: Installs `/usr/local/bin/linux-cru` and a Start Menu shortcut (`~/.local/share/applications/linux-cru.desktop`). Using the app's install/apply buttons affects `/usr/lib/firmware/edid/`, live DRM EDID state, and bootloader/initramfs configs.*
 
-This script installs **Linux CRU (`linux-cru`)**, a native Linux version of ToastyX CRU built for Wayland/DRM.
+This script installs **Linux CRU (`linux-cru`)** and adds an application shortcut. Intended to be a linux alternative to Toastyx's CRU.
 
-- **Linux Full-Frame Interlaced Formatting:** Using Windows CRU through Wine exports interlaced resolutions with halved vertical lines (e.g. `2048x768i @ 320Hz`), because Linux DRM expects the full vertical resolution (`2048x1536i @ 160Hz`) with the interlace flag. `linux-cru` formats interlaced resolutions using full-frame vertical lines so they show up with the correct resolution and refresh rate in Linux Display Settings (and auto-converts Windows CRU `.bin` files on import).
+**Linux Full-Frame Interlaced Formatting:** Using Windows CRU through Wine exports interlaced resolutions with halved vertical lines (e.g. `2048x768i @ 320Hz`), because Linux DRM expects the full vertical resolution (`2048x1536i @ 160Hz`) with the interlace flag. `linux-cru` formats interlaced resolutions using full-frame vertical lines so they show up with the correct resolution and refresh rate in Linux Display Settings (and auto-converts Windows CRU `.bin` files on import).
 - **Port & Profile Selection:** Lets you pick any video port (`VGA-1`, `DVI-I-1`, `DP-1`, `HDMI-A-1`, etc.) and switch between the `Installed Custom EDID`, `Current Monitor EDID` (pulled straight from the display), or saved `.bin` profiles.
 - **Apply Live or Install to Bootloader:** Can reload new EDID changes live into the kernel without rebooting (**Apply Live**), or write the EDID to firmware, update your bootloader `CMDLINE`, and rebuild initramfs directly from the app.
 
 **Usage:**
 
-Install the app and create the Start Menu shortcut:
+Install the app, it will create a application manager shortcut:
 ```bash
 ./install-linux-cru.sh
 ```
@@ -98,9 +101,9 @@ linux-cru
 ```
 
 <p align="center">
-  <img height="460" alt="Linux CRU Detailed Resolution" src="https://github.com/user-attachments/assets/71e6cabe-7dda-4d9b-9511-ea985bc1bb25" />
+  <img height="480" alt="Linux CRU Detailed Resolution" src="https://github.com/user-attachments/assets/71e6cabe-7dda-4d9b-9511-ea985bc1bb25" />
   &nbsp;&nbsp;
-  <img height="460" alt="Linux CRU Main Window" src="https://github.com/user-attachments/assets/0bb7ed51-2293-4027-aacc-d4b914f4a164" />
+  <img height="480" alt="Linux CRU Main Window" src="https://github.com/user-attachments/assets/0bb7ed51-2293-4027-aacc-d4b914f4a164" />
 </p>
 
 
