@@ -8,11 +8,11 @@ I used AI to create these scripts to get interlacing working on Linux Wayland. I
 
 *Compatibility: Arch / CachyOS, Debian / Ubuntu, Fedora, openSUSE (Supports Limine and GRUB bootloaders; mkinitcpio, dracut, and initramfs-tools).*
 
-This script automates setting up your custom EDID file in `/usr/lib/firmware/edid/` and configuring your bootloader so the kernel loads it on boot.
+This script automates detecting your analog video port, setting up your custom EDID file in `/usr/lib/firmware/edid/`, and configuring your bootloader so the kernel loads it on boot.
 
-- Detects your active analog video port (`VGA-1`, `DVI-I-1`, or a specified port), sets older GCN 1.0/1.1 AMD cards to use `amdgpu` instead of `radeon`, and configures Wayland multi-GPU environment rules if needed.
+- Detects your active analog video port (`VGA-1`, `DVI-I-1`, or a specified port).
 - Creates a default EDID `.bin` file in `/usr/lib/firmware/edid/` (or uses an existing `.bin` file you provide) and converts any Windows CRU half-field interlaced timings into Linux's full-frame format.
-- Adds the EDID file to your initramfs config and updates your **Limine** (`/etc/default/limine`) or **GRUB** (`/etc/default/grub`) `CMDLINE` with the `amdgpu`, `radeon`, `drm.edid_firmware`, and `video` boot parameters, then rebuilds the initramfs.
+- Adds the EDID file to your initramfs config and updates your **Limine** (`/etc/default/limine`) or **GRUB** (`/etc/default/grub`) `CMDLINE` with the `drm.edid_firmware`, `video`, and `amdgpu`/`radeon` boot parameters, then rebuilds the initramfs.
 
 If you want to manually add the `CMDLINE` boot configuration with the EDID file pointer, see the first comment by `u/raven2cz` on this Reddit thread:
 
@@ -30,10 +30,11 @@ KERNEL_CMDLINE[default]+="quiet nowatchdog splash rw rootflags=subvol=/@ root=UU
 
 *Compatibility: Arch Linux / CachyOS (`pacman` / `makepkg`).*
 
-This script pulls the latest CachyOS kernel (`7.x.x`) and compiles it with the 15kHz and interlace patches from `D0023R/linux_kernel_15khz`. Use this whenever a kernel update overwrites your patched kernel and causes your interlaced resolutions to disappear.
+This script pulls the latest CachyOS kernel (`7.x.x`) and compiles it with the 15kHz and interlace patches from `D0023R/linux_kernel_15khz` for GPU drivers that support interlacing. Use this whenever a kernel update overwrites your patched kernel and causes your interlaced resolutions to disappear.
 
-- Pulls the latest `linux-cachyos` `PKGBUILD` and the corresponding 15kHz/interlace kernel patches (`01`–`05`, `07`–`09`) for AMD, Intel, and DRM modesetting.
-- Compiles and installs the patched kernel with native CPU optimizations (and `nvidia-open` if installed), then updates Limine/GRUB.
+- Pulls the latest `linux-cachyos` `PKGBUILD` and applies the 15kHz/interlace kernel patches (`01`–`05`, `07`–`09`) to the DRM modesetting and GPU drivers (`amdgpu`, `radeon`, `i915`, `nouveau`) for GPUs capable of interlaced output.
+- Detects your GPU setup (configuring older GCN 1.0/1.1 AMD cards to use `amdgpu` instead of `radeon`, configuring Wayland multi-GPU rules if needed, and enabling `nvidia-open` module builds when an NVIDIA GPU package is installed).
+- Compiles and installs the patched kernel with native CPU optimizations, then updates Limine/GRUB.
 
 For non-Arch distros (such as Debian/Ubuntu or Fedora), you can compile the patches from this repository manually:
 
@@ -52,5 +53,6 @@ This script installs **Linux CRU (`linux-cru`)** and adds a shortcut to your Sta
 - **Apply Live or Install to Bootloader:** Can reload new EDID changes live into the kernel without rebooting (**Apply Live**), or write the EDID to `/usr/lib/firmware/edid/`, update your Limine/GRUB `CMDLINE`, and rebuild initramfs directly from the app.
 
 <img width="2661" height="1580" alt="image" src="https://github.com/user-attachments/assets/a2a494d6-c874-46bb-8cda-1cb72e295ca2" />
+
 
 
