@@ -2,7 +2,7 @@
 
 I used AI to automate the processes that I have been doing for EDID configurations and installing the 15khz patches for monitor interlacing. I am not an experienced coder or scripter. **_USE THESE AT YOUR OWN RISK_**.
 
-These were tested on a fresh install of the latest CachyOS, 7.3 kernels, KDE 6.8, Wayland.
+These were tested on a fresh install of the latest CachyOS, 7.3 kernels, KDE 6.8, Wayland. Monitor used was an HP p1230 (2070sb rebadge).
 
 ### Getting Started (Download the Scripts)
 
