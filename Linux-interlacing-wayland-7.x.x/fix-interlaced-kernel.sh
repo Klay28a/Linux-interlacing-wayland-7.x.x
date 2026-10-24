@@ -112,24 +112,11 @@ echo "==> [5/6] Updating checksums and compiling kernel..."
 updpkgsums
 makepkg -Csfi --skippgpcheck
 
-echo "==> [6/6] Ensuring custom EDID files remain embedded in initramfs and syncing bootloader..."
-if [ -f /etc/mkinitcpio.conf ] && [ -d /usr/lib/firmware/edid ]; then
-    for edid_bin in /usr/lib/firmware/edid/*.bin; do
-        [ -f "$edid_bin" ] || continue
-        if ! grep -Fq "$edid_bin" /etc/mkinitcpio.conf; then
-            sudo sed -i "s|^FILES=(|FILES=($edid_bin |" /etc/mkinitcpio.conf
-        fi
-    done
-fi
-
+echo "==> [6/6] Syncing initramfs and bootloader..."
 if command -v limine-mkinitcpio >/dev/null 2>&1; then
     sudo limine-mkinitcpio
 elif command -v mkinitcpio >/dev/null 2>&1; then
     sudo mkinitcpio -P
-elif command -v dracut >/dev/null 2>&1; then
-    sudo dracut --regenerate-all --force
-elif command -v update-initramfs >/dev/null 2>&1; then
-    sudo update-initramfs -u -k all
 fi
 
 if [ -f /etc/default/grub ]; then

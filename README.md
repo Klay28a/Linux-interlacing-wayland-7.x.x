@@ -2,17 +2,17 @@
 
 I used AI to create these scripts to get interlacing working on Linux Wayland. I am not an experienced scripter or coder — use these at your own risk.
 
-Each script in this repository is designed to work completely standalone on its own, or together with the other scripts without conflicting.
-
 -----------------------------------------------------------------------
 
 **setup-interlace-env.sh**
 
-This script automates setting up the Linux environment and bootloader configuration required for CRT monitors, custom EDIDs, and interlaced resolutions on Wayland:
+*Compatibility: Arch / CachyOS, Debian / Ubuntu, Fedora, openSUSE (Supports Limine and GRUB bootloaders; mkinitcpio, dracut, and initramfs-tools).*
 
-- **Auto-Detects Your Analog Output & Multi-GPU Setup:** Automatically detects your active analog connector (`VGA-1`, `DVI-I-1`, or a user-specified port), forces `amdgpu` instead of the legacy `radeon` driver on Southern Islands (GCN 1.0) and Sea Islands (GCN 1.1) cards, and configures KWin Wayland environment rules (including Dual-GPU Reverse PRIME udev rules when NVIDIA + AMD GPUs are paired).
-- **Creates or Converts Your EDID `.bin` File:** Generates a clean Linux-formatted CRT EDID at `/usr/lib/firmware/edid/crufile.bin` (or validates an existing `.bin` file if you pass one in). If you import an EDID exported from Windows ToastyX CRU (which stores half-field vertical lines for interlaced modes), this script automatically converts those interlaced timings to Linux DRM's full-frame vertical format while leaving valid Linux modes untouched.
-- **Embeds the EDID in Initramfs & Bootloader `CMDLINE`:** Adds the EDID binary to `/etc/mkinitcpio.conf` (`FILES=(...)`) or `dracut` so it loads during early boot, updates `/etc/default/limine` and/or `/etc/default/grub` with the required kernel parameters (while preserving any other ports' EDID overrides created by `linux-cru`), rebuilds the initramfs, and reloads the EDID live in the running kernel.
+This script automates setting up your custom EDID file in `/usr/lib/firmware/edid/` and configuring your bootloader so the kernel loads it on boot.
+
+- Detects your active analog video port (`VGA-1`, `DVI-I-1`, or a specified port), sets older GCN 1.0/1.1 AMD cards to use `amdgpu` instead of `radeon`, and configures Wayland multi-GPU environment rules if needed.
+- Creates a default EDID `.bin` file in `/usr/lib/firmware/edid/` (or uses an existing `.bin` file you provide) and converts any Windows CRU half-field interlaced timings into Linux's full-frame format.
+- Adds the EDID file to your initramfs config and updates your **Limine** (`/etc/default/limine`) or **GRUB** (`/etc/default/grub`) `CMDLINE` with the `amdgpu`, `radeon`, `drm.edid_firmware`, and `video` boot parameters, then rebuilds the initramfs.
 
 If you want to manually add the `CMDLINE` boot configuration with the EDID file pointer, see the first comment by `u/raven2cz` on this Reddit thread:
 
@@ -28,13 +28,14 @@ KERNEL_CMDLINE[default]+="quiet nowatchdog splash rw rootflags=subvol=/@ root=UU
 
 **fix-interlaced-kernel.sh**
 
-This script compiles and installs the CachyOS / Arch Linux kernel with the 15kHz and interlaced DRM display patches applied. Run this whenever a kernel update overwrites your patched kernel and causes your interlaced resolutions to disappear:
+*Compatibility: Arch Linux / CachyOS (`pacman` / `makepkg`).*
 
-- **Automatic Kernel Series Matching (7.2.x / 7.3.x+):** Fetches the latest `linux-cachyos` `PKGBUILD` and pulls the matching kernel patch set from `D0023R/linux_kernel_15khz`.
-- **Applies Full Interlace & 15kHz DRM Patches:** Copies and applies the official 15kHz and interlace kernel patches (`01`–`05`, `07`–`09`), fixing interlaced mode validation, DCE/DCN interlaced timing calculation, PLL clock limits, DDC probing, and even-field vertical rounding across AMD (`amdgpu`/`radeon`), Intel (`i915`), and DRM KMS drivers.
-- **Preserves Custom EDIDs Across Rebuilds:** Compiles the kernel with native CPU optimizations, automatically enables `linux-cachyos-nvidia-open` if installed, ensures all `/usr/lib/firmware/edid/*.bin` files (from either `setup-interlace-env.sh` or `linux-cru`) remain embedded in `/etc/mkinitcpio.conf`, and syncs Limine/GRUB.
+This script pulls the latest CachyOS kernel (`7.x.x`) and compiles it with the 15kHz and interlace patches from `D0023R/linux_kernel_15khz`. Use this whenever a kernel update overwrites your patched kernel and causes your interlaced resolutions to disappear.
 
-Patch source repository for other distributions (such as Debian/Ubuntu/Fedora) if compiling manually:
+- Pulls the latest `linux-cachyos` `PKGBUILD` and the corresponding 15kHz/interlace kernel patches (`01`–`05`, `07`–`09`) for AMD, Intel, and DRM modesetting.
+- Compiles and installs the patched kernel with native CPU optimizations (and `nvidia-open` if installed), then updates Limine/GRUB.
+
+For non-Arch distros (such as Debian/Ubuntu or Fedora), you can compile the patches from this repository manually:
 
 https://github.com/D0023R/linux_kernel_15khz
 
@@ -42,12 +43,14 @@ https://github.com/D0023R/linux_kernel_15khz
 
 **install-linux-cru.sh**
 
-This script installs **Linux CRU (`linux-cru`)**, a standalone PyQt6 Custom Resolution Utility for Linux Wayland/DRM modeled after ToastyX CRU, and adds a **Linux CRU** shortcut to your desktop Start Menu:
+*Compatibility: Arch / CachyOS, Debian / Ubuntu, Fedora, openSUSE.*
 
-- **Proper Linux Full-Frame Interlaced Formatting:** When running Windows ToastyX CRU under Wine, interlaced resolutions are exported using half-field vertical lines (for example, `2048x768i` instead of `2048x1536i`), which causes Linux DRM to misread the vertical resolution and double the refresh rate (`2048x768i @ 320Hz`). `linux-cru` natively calculates and encodes full-frame vertical timings (`2048x1536i @ 160Hz`) so interlaced modes appear and work properly in Linux Display Settings. Also automatically converts Windows CRU `.bin` files on import.
-- **Verified Timing Presets & Live Manual Calculator:** Includes `Automatic CRT`, `Automatic PC`, `Automatic HDTV`, `Native PC`, `Native HDTV`, `CVT Standard`, `CVT-RB`, `CVT-RB2`, `GTF Standard`, and full `Manual` editing for both **Detailed Resolutions (4 Slots)** and **Standard Resolutions (8 Slots)**, with live-updating Front/Sync/Back Porch, Blanking, Total, H-Scan (kHz), Refresh Rate (Hz), and Pixel Clock (MHz) calculations.
-- **Multi-Port Selection & Per-Port Profiles:** Lets you select any video port across your GPUs (`VGA-1`, `DVI-I-1`, `DVI-D-1`, `DP-1`, `HDMI-A-1`, etc.), pull the `Current Monitor EDID` directly from the display via DRM, edit the `Installed Custom EDID`, or save/load custom `.bin` profiles.
-- **Apply Live (No Reboot) & Standalone Bootloader Install:** Includes an **Apply Live (No Reboot)** button that reloads the new EDID into the kernel DRM driver and triggers a display hotplug refresh immediately without rebooting, plus an **Install & Rebuild Initramfs** button that creates the `/usr/lib/firmware/edid/` file, updates your Limine/GRUB `CMDLINE` and `mkinitcpio.conf`, and rebuilds the initramfs without requiring any of the other scripts.
+This script installs **Linux CRU (`linux-cru`)** and adds a shortcut to your Start Menu. It is a native Linux version of ToastyX CRU built for Wayland/DRM.
+
+- **Linux Full-Frame Interlaced Formatting:** Using Windows CRU through Wine exports interlaced resolutions with halved vertical lines (e.g. `2048x768i @ 320Hz`), because Linux DRM expects the full vertical resolution (`2048x1536i @ 160Hz`) with the interlace flag. `linux-cru` formats interlaced resolutions using full-frame vertical lines so they show up with the correct resolution and refresh rate in Linux Display Settings (and auto-converts Windows CRU `.bin` files on import).
+- **Port & Profile Selection:** Lets you pick any video port on your system (`VGA-1`, `DVI-I-1`, `DP-1`, `HDMI-A-1`, etc.) and switch between the `Installed Custom EDID`, `Current Monitor EDID` (pulled straight from the display), or saved `.bin` profiles.
+- **Apply Live or Install to Bootloader:** Can reload new EDID changes live into the kernel without rebooting (**Apply Live**), or write the EDID to `/usr/lib/firmware/edid/`, update your Limine/GRUB `CMDLINE`, and rebuild initramfs directly from the app.
 
 <img width="2661" height="1580" alt="image" src="https://github.com/user-attachments/assets/a2a494d6-c874-46bb-8cda-1cb72e295ca2" />
+
 
