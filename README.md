@@ -52,9 +52,9 @@ This script installs **Linux CRU (`linux-cru`)** and adds a shortcut to your Sta
 - **Port & Profile Selection:** Lets you pick any video port on your system (`VGA-1`, `DVI-I-1`, `DP-1`, `HDMI-A-1`, etc.) and switch between the `Installed Custom EDID`, `Current Monitor EDID` (pulled straight from the display), or saved `.bin` profiles.
 - **Apply Live or Install to Bootloader:** Can reload new EDID changes live into the kernel without rebooting (**Apply Live**), or write the EDID to `/usr/lib/firmware/edid/`, update your Limine/GRUB `CMDLINE`, and rebuild initramfs directly from the app.
 
-<img width="1086" height="1586" alt="image" src="https://github.com/user-attachments/assets/71e6cabe-7dda-4d9b-9511-ea985bc1bb25" />
-<img width="1389" height="1219" alt="image" src="https://github.com/user-attachments/assets/0bb7ed51-2293-4027-aacc-d4b914f4a164" />
-
-
-
+<p align="center">
+  <img height="460" alt="Linux CRU Detailed Resolution" src="https://github.com/user-attachments/assets/71e6cabe-7dda-4d9b-9511-ea985bc1bb25" />
+  &nbsp;&nbsp;
+  <img height="460" alt="Linux CRU Main Window" src="https://github.com/user-attachments/assets/0bb7ed51-2293-4027-aacc-d4b914f4a164" />
+</p>
 
