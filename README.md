@@ -50,7 +50,7 @@ Mine is set up like this:
 ```ini
 KERNEL_CMDLINE[default]+="quiet nowatchdog splash rw rootflags=subvol=/@ root=UUID=17b88c21-6079-4146-af74-bde4fe7209fe radeon.si_support=0 amdgpu.si_support=1 radeon.cik_support=0 amdgpu.cik_support=1 drm.edid_firmware=VGA-1:edid/crufile.bin video=VGA-1:e"
 ```
-These parameters: radeon.si_support=0 amdgpu.si_support=1 radeon.cik_support=0 amdgpu.cik_support=1 help when using the AMD Rx 200 and 300 Series by preventing them from using legacy drivers. (GCN 1.0 and 1.1) Unsure if this is still needed now because the latest 7.3 kernels has added more support for older cards. These parameters were being used when I was on 7.2.x kernels.
+These parameters: 'radeon.si_support=0 amdgpu.si_support=1 radeon.cik_support=0 amdgpu.cik_support=1' help when using the AMD Rx 200 and 300 Series by preventing them from using legacy drivers. (GCN 1.0 and 1.1) Unsure if this is still needed now because the latest 7.3 kernels has added more support for older cards. These parameters were being used when I was on 7.2.x kernels.
 
 -----------------------------------------------------------------------
 
