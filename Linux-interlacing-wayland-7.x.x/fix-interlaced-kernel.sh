@@ -82,7 +82,42 @@ if [ "${#PATCH_FILES[@]}" -eq 0 ]; then
     exit 1
 fi
 
-echo "==> [4/6] Configuring PKGBUILD (Native CPU + GPU Modules + Interlace Patches)..."
+echo "==> [4/6] Configuring GPU driver rules and PKGBUILD (Native CPU + GPU Modules + Interlace Patches)..."
+NV_PCI="$(lspci -D -nn 2>/dev/null | grep -E "VGA|3D" | grep -i "10de:" | head -n 1 | awk '{print $1}' || true)"
+AMD_LAST_PCI="$(lspci -D -nn 2>/dev/null | grep -E "VGA|Display" | grep -i "1002:" | tail -n 1 | awk '{print $1}' || true)"
+
+mkdir -p "$HOME/.config/environment.d"
+echo "KWIN_FORCE_SW_CURSOR=1" > "$HOME/.config/environment.d/kwin-cursor.conf"
+
+if [ -n "$NV_PCI" ] && [ -n "$AMD_LAST_PCI" ]; then
+    echo "  -> Detected Dual-GPU NVIDIA ($NV_PCI) + AMD ($AMD_LAST_PCI) setup"
+    sudo mkdir -p /etc/udev/rules.d
+    cat << UDEV_EOF | sudo tee /etc/udev/rules.d/99-kwin-gpu.rules >/dev/null
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", KERNELS=="$NV_PCI", SYMLINK+="dri/primary-nvidia"
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", KERNELS=="$AMD_LAST_PCI", SYMLINK+="dri/secondary-amd"
+UDEV_EOF
+    sudo udevadm control --reload-rules && sudo udevadm trigger
+    cat << ENV_EOF > "$HOME/.config/environment.d/nvidia-prime.conf"
+KWIN_DRM_DEVICES=/dev/dri/primary-nvidia:/dev/dri/secondary-amd
+__NV_PRIME_RENDER_OFFLOAD=1
+__GLX_VENDOR_LIBRARY_NAME=nvidia
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json
+ENV_EOF
+else
+    rm -f "$HOME/.config/environment.d/nvidia-prime.conf"
+    if [ -f /etc/udev/rules.d/99-kwin-gpu.rules ]; then
+        sudo rm -f /etc/udev/rules.d/99-kwin-gpu.rules
+        sudo udevadm control --reload-rules && sudo udevadm trigger
+    fi
+fi
+
+sudo mkdir -p /etc/modprobe.d
+cat << 'MOD_EOF' | sudo tee /etc/modprobe.d/amdgpu-crt.conf >/dev/null
+options radeon si_support=0 cik_support=0
+options amdgpu si_support=1 cik_support=1
+blacklist radeon
+MOD_EOF
+
 sed -i 's/: "${_processor_opt:=.*}"/: "${_processor_opt:=native}"/' PKGBUILD
 
 if pacman -Qq linux-cachyos-nvidia-open >/dev/null 2>&1; then

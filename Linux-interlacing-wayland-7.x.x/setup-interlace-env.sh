@@ -57,50 +57,10 @@ fi
 EDID_DEST="/usr/lib/firmware/edid/${EDID_NAME}"
 EDID_SRC="${USER_EDID_SRC:-$EDID_DEST}"
 
-echo "==> [1/5] Target DRM Connector: $CONNECTOR (Firmware target: $EDID_DEST)"
+echo "==> [1/4] Target DRM Connector: $CONNECTOR (Firmware target: $EDID_DEST)"
 
-# 2. Configure GPU Environment & Udev Symlinks
-echo "==> [2/5] Configuring GPU environment and Wayland cursor rules..."
-NV_PCI="$(lspci -D -nn 2>/dev/null | grep -E "VGA|3D" | grep -i "10de:" | head -n 1 | awk '{print $1}' || true)"
-AMD_COUNT="$(lspci -D -nn 2>/dev/null | grep -E "VGA|Display" | grep -ic "1002:" || true)"
-AMD_LAST_PCI="$(lspci -D -nn 2>/dev/null | grep -E "VGA|Display" | grep -i "1002:" | tail -n 1 | awk '{print $1}' || true)"
-
-mkdir -p "$HOME/.config/environment.d"
-echo "KWIN_FORCE_SW_CURSOR=1" > "$HOME/.config/environment.d/kwin-cursor.conf"
-
-if [ -n "$NV_PCI" ] && [ -n "$AMD_LAST_PCI" ]; then
-    echo "  -> Detected Dual-GPU NVIDIA ($NV_PCI) + AMD ($AMD_LAST_PCI) Reverse PRIME setup"
-    sudo mkdir -p /etc/udev/rules.d
-    cat << UDEV_EOF | sudo tee /etc/udev/rules.d/99-kwin-gpu.rules >/dev/null
-SUBSYSTEM=="drm", KERNEL=="card[0-9]*", KERNELS=="$NV_PCI", SYMLINK+="dri/primary-nvidia"
-SUBSYSTEM=="drm", KERNEL=="card[0-9]*", KERNELS=="$AMD_LAST_PCI", SYMLINK+="dri/secondary-amd"
-UDEV_EOF
-    sudo udevadm control --reload-rules && sudo udevadm trigger
-    cat << ENV_EOF > "$HOME/.config/environment.d/nvidia-prime.conf"
-KWIN_DRM_DEVICES=/dev/dri/primary-nvidia:/dev/dri/secondary-amd
-__NV_PRIME_RENDER_OFFLOAD=1
-__GLX_VENDOR_LIBRARY_NAME=nvidia
-VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json
-ENV_EOF
-else
-    echo "  -> Detected AMD/Single-vendor GPU setup ($AMD_COUNT AMD GPU(s)); ensuring clean environment"
-    rm -f "$HOME/.config/environment.d/nvidia-prime.conf"
-    if [ -f /etc/udev/rules.d/99-kwin-gpu.rules ]; then
-        sudo rm -f /etc/udev/rules.d/99-kwin-gpu.rules
-        sudo udevadm control --reload-rules && sudo udevadm trigger
-    fi
-fi
-
-# Force amdgpu over legacy radeon for GCN 1.0 (SI) and GCN 1.1 (CIK)
-sudo mkdir -p /etc/modprobe.d
-cat << 'MOD_EOF' | sudo tee /etc/modprobe.d/amdgpu-crt.conf >/dev/null
-options radeon si_support=0 cik_support=0
-options amdgpu si_support=1 cik_support=1
-blacklist radeon
-MOD_EOF
-
-# 3. Create or Validate Linux-Formatted EDID Binary
-echo "==> [3/5] Preparing Linux-formatted EDID at $EDID_DEST..."
+# 2. Create or Validate Linux-Formatted EDID Binary
+echo "==> [2/4] Preparing Linux-formatted EDID at $EDID_DEST..."
 python3 - "$EDID_SRC" "$TMP_EDID" << 'PYEOF'
 import sys, os
 
