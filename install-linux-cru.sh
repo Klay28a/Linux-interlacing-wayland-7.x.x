@@ -1412,8 +1412,11 @@ if __name__ == "__main__":
 APP_EOF
 
 sudo install -m 0755 "$TMP_APP" /usr/local/bin/linux-cru
-cp "$TMP_APP" "$HOME/bin/linux-cru"
-chmod +x "$HOME/bin/linux-cru"
+mkdir -p "$HOME/.local/bin"
+install -m 0755 "$TMP_APP" "$HOME/.local/bin/linux-cru"
+if [ -d "$HOME/bin" ]; then
+    install -m 0755 "$TMP_APP" "$HOME/bin/linux-cru"
+fi
 
 echo "==> [3/3] Creating Desktop Launcher Shortcut..."
 mkdir -p "$HOME/.local/share/applications"
@@ -1427,5 +1430,12 @@ Terminal=false
 Type=Application
 Categories=System;Settings;HardwareSettings;
 DESKTOP_EOF
+chmod +x "$HOME/.local/share/applications/linux-cru.desktop"
+if [ -d "$HOME/Desktop" ]; then
+    install -m 0755 "$HOME/.local/share/applications/linux-cru.desktop" "$HOME/Desktop/Linux CRU.desktop"
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$HOME/.local/share/applications" >/dev/null 2>&1 || true
+fi
 
 echo "==> Linux CRU installed! Run 'linux-cru' or launch it from your application menu."
