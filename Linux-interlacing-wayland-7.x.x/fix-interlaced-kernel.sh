@@ -14,10 +14,8 @@ if [ "$(id -u)" -eq 0 ]; then
     exit 1
 fi
 
-echo "==> [1/6] Ensuring required kernel build tools and LLVM/Rust dependencies are installed..."
-sudo pacman -S --needed --noconfirm \
-    base-devel git pacman-contrib python bc cpio gettext libelf openssl \
-    pahole perl tar xxhash xz zlib zstd clang llvm lld rust rust-bindgen rust-src
+echo "==> [1/6] Ensuring required build tools are installed..."
+sudo pacman -S --needed --noconfirm base-devel git pacman-contrib rust rust-bindgen rust-src python
 
 mkdir -p "$BUILD_ROOT"
 cd "$BUILD_ROOT"
