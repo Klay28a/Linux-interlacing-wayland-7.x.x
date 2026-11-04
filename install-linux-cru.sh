@@ -7,50 +7,110 @@ TMP_APP="$(mktemp)"
 trap 'rm -f "$TMP_APP"' EXIT
 
 echo "==> [1/3] Installing Python 3 & PyQt6..."
-if command -v pacman >/dev/null 2>&1; then
-    sudo pacman -S --needed --noconfirm python python-pyqt6
-elif command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get update && sudo apt-get install -y python3 python3-pyqt6
-elif command -v dnf >/dev/null 2>&1; then
-    sudo dnf install -y python3 python3-pyqt6
-elif command -v zypper >/dev/null 2>&1; then
-    sudo zypper install -y python3 python-PyQt6
+if ! python3 -c "import PyQt6" >/dev/null 2>&1; then
+    if command -v pacman >/dev/null 2>&1; then
+        sudo pacman -S --needed --noconfirm python python-pyqt6
+    elif command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update && sudo apt-get install -y python3 python3-pyqt6
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y python3 python3-pyqt6
+    elif command -v zypper >/dev/null 2>&1; then
+        sudo zypper install -y python3 python-PyQt6
+    fi
+else
+    echo "  -> Python 3 & PyQt6 are already installed."
 fi
 
 echo "==> [2/3] Installing /usr/local/bin/linux-cru..."
 cat << 'APP_EOF' > "$TMP_APP"
 #!/usr/bin/env python3
-import sys
-import os
+"""
+Linux CRU — Standardized ToastyX-Style Custom Resolution Utility for Linux
+==========================================================================
+Features:
+  - Exact ToastyX CRU timing calculation engine (Automatic CRT, Automatic PC,
+    Automatic HDTV, Native PC, Native HDTV, Exact, Exact CRT, CVT Standard,
+    CVT-RB Standard, CVT-RB2 Standard, GTF Standard, Manual)
+  - Preserves decimal points across Refresh Rate (Hz), Horizontal Scan (kHz),
+    Pixel Clock (MHz), and ToastyX half-line (.5) interlaced vertical timings
+  - Instant "Switch to Manual (Keep Values)" button that unlocks all calculated
+    timings from GTF/CVT/Auto directly into Manual mode without losing values
+  - Responsive, non-clipping card UI with Ctrl+Scroll / Ctrl++/- zoom scaling
+"""
+
 import glob
+import html
+import json
 import math
+import os
+import re
 import struct
 import subprocess
-from PyQt6.QtCore import Qt
+import sys
+from pathlib import Path
+
+from PyQt6.QtCore import QEvent, Qt
+from PyQt6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QGridLayout, QTableWidget, QTableWidgetItem, QPushButton, QLabel,
-    QFileDialog, QDialog, QFormLayout, QSpinBox, QDoubleSpinBox,
-    QCheckBox, QComboBox, QMessageBox, QGroupBox, QHeaderView,
-    QListWidget, QListWidgetItem, QAbstractItemView
+    QAbstractItemView,
+    QApplication,
+    QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QInputDialog,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QRadioButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt6.QtGui import QColor, QFont
 
 DEFAULT_EDID_PATH = "/usr/lib/firmware/edid/crufile.bin"
+CONFIG_DIR = os.path.expanduser("~/.config/linux-cru")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+DOCS_PROFILES_DIR = os.path.expanduser("~/Documents/linux-cru")
+LEGACY_PROFILES_DIR = os.path.join(CONFIG_DIR, "profiles")
+PROFILES_DIR = DOCS_PROFILES_DIR
+
 DTD_OFFSETS = (54, 72, 90, 108)
-ASPECT_MAP = {0: ("16:10", 10, 16), 1: ("4:3", 3, 4), 2: ("5:4", 4, 5), 3: ("16:9", 9, 16)}
+ASPECT_MAP = {
+    0: ("16:10", 10, 16),
+    1: ("4:3", 3, 4),
+    2: ("5:4", 4, 5),
+    3: ("16:9", 9, 16),
+}
 
 TIMING_PRESETS = [
+    "Manual",
     "Automatic CRT",
     "Automatic PC",
     "Automatic HDTV",
     "Native PC",
     "Native HDTV",
+    "Exact",
+    "Exact CRT",
     "CVT Standard",
-    "CVT-RB",
-    "CVT-RB2",
+    "CVT-RB Standard",
+    "CVT-RB2 Standard",
     "GTF Standard",
-    "Manual",
 ]
 
 STD_PRESETS = [
@@ -83,111 +143,638 @@ def update_checksum(b):
         b[127] = (256 - (sum(b[:127]) % 256)) % 256
 
 
-def _cvt_vsync_lines(hactive, vactive):
-    if vactive <= 0:
-        return 4
-    r = hactive / float(vactive)
-    for target, lines in ((4/3, 4), (16/9, 5), (16/10, 6), (5/4, 7), (15/9, 7)):
-        if abs(r - target) < 0.03:
-            return lines
-    return 4
+def load_ui_config() -> dict:
+    cfg = {"ui_scale": 1.0}
+    try:
+        if os.path.exists(CONFIG_FILE):
+            data = json.loads(Path(CONFIG_FILE).read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                cfg.update(data)
+    except Exception:
+        pass
+    cfg["ui_scale"] = max(0.75, min(1.65, float(cfg.get("ui_scale", 1.0) or 1.0)))
+    return cfg
 
 
-def calculate_timings(preset_name, hactive, vactive, refresh_hz, interlaced):
-    hactive, vactive = max(64, int(hactive)), max(64, int(vactive))
-    if interlaced and vactive % 2 != 0:
-        vactive += 1
-    refresh_hz = 60.0 if "Native" in preset_name else max(20.0, float(refresh_hz))
-    frame_rate = (refresh_hz / 2.0) if interlaced else refresh_hz
-    v_scale = 2 if interlaced else 1
-    v_lines_field = (vactive / 2.0) if interlaced else float(vactive)
+def save_ui_config(cfg: dict) -> None:
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        Path(CONFIG_FILE).write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
-    if preset_name == "CVT-RB2":
-        hfront, hsync, hblank = 8, 32, 80
-        hsync_pos, vsync_pos = True, False
-        vbi_f = int(math.ceil((refresh_hz * v_lines_field * 460e-6) / max(0.05, 1.0 - refresh_hz * 460e-6)))
-        vfront, vsync = 1 * v_scale, 8 * v_scale
-        vblank = max(15 * v_scale, vbi_f * v_scale)
 
-    elif preset_name in ("CVT-RB", "Automatic PC", "Native PC"):
-        hfront, hsync, hblank = 48, 32, 160
-        hsync_pos, vsync_pos = True, False
-        vsync_f = _cvt_vsync_lines(hactive, vactive) if preset_name == "CVT-RB" else 4
-        vbi_f = int(math.ceil((refresh_hz * v_lines_field * 460e-6) / max(0.05, 1.0 - refresh_hz * 460e-6)))
-        vfront, vsync = 3 * v_scale, vsync_f * v_scale
-        vblank = max((3 + vsync_f + 6) * v_scale, vbi_f * v_scale)
+class AutoWrapLabel(QLabel):
+    """QLabel that wraps text cleanly without forcing wide minimum widths or clipping on small windows."""
 
-    elif preset_name in ("Automatic HDTV", "Native HDTV"):
-        hsync_pos, vsync_pos = True, True
-        if hactive == 1920 and vactive == 1080:
-            hfront, hsync, hblank = 88, 44, 280
-            vfront, vsync, vblank = (4, 10, 44) if interlaced else (4, 5, 45)
-        elif hactive == 1280 and vactive == 720 and not interlaced:
-            hfront, hsync, hblank, vfront, vsync, vblank = 110, 40, 370, 5, 5, 30
-        elif hactive == 3840 and vactive == 2160 and not interlaced:
-            hfront, hsync, hblank, vfront, vsync, vblank = 176, 88, 560, 8, 10, 90
-        elif hactive in (640, 720) and vactive == 480:
-            hsync_pos, vsync_pos = False, False
-            hfront, hsync, hblank = 16, (96 if hactive == 640 else 62), (160 if hactive == 640 else 138)
-            vfront, vsync, vblank = (8, 6, 44) if interlaced else (10, 2, 45)
+    def __init__(self, text: str = "", parent: QWidget | None = None):
+        super().__init__(text, parent)
+        self.setWordWrap(True)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def minimumSizeHint(self):
+        sh = super().minimumSizeHint()
+        sh.setWidth(min(sh.width(), 120))
+        if self.wordWrap() and self.width() > 50:
+            h = self.heightForWidth(self.width())
+            if h > 0:
+                sh.setHeight(h)
+        return sh
+
+    def sizeHint(self):
+        sh = super().sizeHint()
+        sh.setWidth(min(sh.width(), 220))
+        if self.wordWrap() and self.width() > 50:
+            h = self.heightForWidth(self.width())
+            if h > 0:
+                sh.setHeight(h)
+        return sh
+
+    def setText(self, text: str):
+        super().setText(text)
+        self.updateGeometry()
+
+
+class NoWheelComboBox(QComboBox):
+    """QComboBox that ignores scroll wheel unless popup is open so scrolling never mutates settings."""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.setMinimumContentsLength(10)
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class NoWheelSpinBox(QSpinBox):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event):
+        if not self.hasFocus():
+            event.ignore()
         else:
-            vfront, vsync = 4 * v_scale, 5 * v_scale
-            vblank = (45 if vactive >= 1080 else 30) * v_scale
-            hfront = max(16, int(round(hactive * 0.045 / 8.0)) * 8)
-            hsync = max(32, int(round(hactive * 0.023 / 8.0)) * 8)
-            hblank = max(hfront + hsync + 48, int(round(hactive * 0.145 / 8.0)) * 8)
+            super().wheelEvent(event)
 
-    elif preset_name in ("GTF Standard", "CVT Standard"):
-        hsync_pos, vsync_pos = False, True
-        is_cvt = (preset_name == "CVT Standard")
-        vfront_f = 3 if is_cvt else 1
-        vsync_f = _cvt_vsync_lines(hactive, vactive) if is_cvt else 3
-        h_per = ((1.0 / refresh_hz) - 550e-6) / max(1.0, v_lines_field + vfront_f + (0.5 if interlaced else 0.0)) * 1e6
-        v_sync_bp = (max(vsync_f + 6, int(math.floor(550.0 / max(1.0, h_per))) + 1) if is_cvt
-                     else max(7, int(round(550.0 / max(1.0, h_per)))))
-        vfront, vsync, vblank = vfront_f * v_scale, vsync_f * v_scale, (vfront_f + v_sync_bp) * v_scale
-        duty = max(20.0, 30.0 - (300.0 * h_per / 1000.0))
-        rnd_fn = math.floor if is_cvt else round
-        hblank = max(32, int(rnd_fn(hactive * duty / (100.0 - duty) / 16.0)) * 16)
-        htotal = hactive + hblank
-        hsync = max(8, int(rnd_fn(htotal * 0.08 / 8.0)) * 8)
-        hfront = max(8, (hblank // 2) - hsync)
+
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    """QDoubleSpinBox that formats clean integers when .0 and preserves .5 or decimals when present."""
+
+    def __init__(self, trim_trailing_zeros: bool = False, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.trim_trailing_zeros = trim_trailing_zeros
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def textFromValue(self, value: float) -> str:
+        if self.trim_trailing_zeros:
+            rounded = round(value, self.decimals())
+            if abs(rounded - round(rounded)) < 1e-6:
+                return str(int(round(rounded)))
+            return f"{rounded:.{self.decimals()}f}".rstrip("0").rstrip(".")
+        return super().textFromValue(value)
+
+    def wheelEvent(self, event):
+        if not self.hasFocus():
+            event.ignore()
+        else:
+            super().wheelEvent(event)
+
+
+TOASTYX_AUTO_PC = [
+    (1920, 1080, False, 59500, 60500, 88, 44, 148, 4, 5, 36, True, True),
+    (1920, 1080, False, 49500, 50500, 528, 44, 148, 4, 5, 36, True, True),
+    (1920, 1080, False, 47500, 48500, 638, 44, 148, 4, 5, 36, True, True),
+    (1920, 1080, False, 29500, 30500, 88, 44, 148, 4, 5, 36, True, True),
+    (1920, 1080, False, 24500, 25500, 528, 44, 148, 4, 5, 36, True, True),
+    (1920, 1080, False, 23500, 24500, 638, 44, 148, 4, 5, 36, True, True),
+    (1920, 1080, True, 59500, 60500, 88, 44, 148, 4, 10, 31, True, True),
+    (1920, 1080, True, 49500, 50500, 528, 44, 148, 4, 10, 31, True, True),
+    (1600, 900, False, 59500, 60500, 24, 80, 96, 1, 3, 96, True, True),
+    (1366, 768, False, 59500, 60500, 70, 143, 213, 3, 3, 24, True, True),
+    (1360, 768, False, 59500, 60500, 64, 112, 256, 3, 6, 18, True, True),
+    (1280, 720, False, 59500, 60500, 110, 40, 220, 5, 5, 20, True, True),
+    (1280, 720, False, 49500, 50500, 440, 40, 220, 5, 5, 20, True, True),
+    (1280, 720, False, 47500, 48500, 960, 40, 220, 5, 5, 20, True, True),
+    (1280, 720, False, 29500, 30500, 1760, 40, 220, 5, 5, 20, True, True),
+    (1280, 720, False, 24500, 25500, 2420, 40, 220, 5, 5, 20, True, True),
+    (1280, 720, False, 23500, 24500, 1760, 40, 220, 5, 5, 20, True, True),
+    (1440, 576, True, 49500, 50500, 24, 126, 138, 4, 6, 39, False, False),
+    (1440, 480, True, 59500, 60500, 38, 124, 114, 8, 6, 31, False, False),
+    (720, 576, False, 49500, 50500, 12, 64, 68, 5, 5, 39, False, False),
+    (720, 480, False, 59500, 60500, 16, 62, 60, 9, 6, 30, False, False),
+    (640, 480, False, 59500, 60500, 16, 96, 48, 10, 2, 33, False, False),
+]
+
+TOASTYX_AUTO_HDTV = [
+    (3840, 2160, False, 119500, 120500, 176, 88, 296, 8, 10, 72, True, True),
+    (3840, 2160, False, 99500, 100500, 1056, 88, 296, 8, 10, 72, True, True),
+    (3840, 2160, False, 59500, 60500, 176, 88, 296, 8, 10, 72, True, True),
+    (3840, 2160, False, 49500, 50500, 1056, 88, 296, 8, 10, 72, True, True),
+    (3840, 2160, False, 47500, 48500, 1276, 88, 296, 8, 10, 72, True, True),
+    (3840, 2160, False, 29500, 30500, 176, 88, 296, 8, 10, 72, True, True),
+    (3840, 2160, False, 24500, 25500, 1056, 88, 296, 8, 10, 72, True, True),
+    (3840, 2160, False, 23500, 24500, 1276, 88, 296, 8, 10, 72, True, True),
+    (2560, 1080, False, 59500, 60500, 248, 44, 148, 4, 5, 11, True, True),
+    (2560, 1080, False, 49500, 50500, 548, 44, 148, 4, 5, 36, True, True),
+    (1920, 1080, False, 119500, 120500, 88, 44, 148, 4, 5, 36, True, True),
+    (1920, 1080, False, 99500, 100500, 528, 44, 148, 4, 5, 36, True, True),
+    (1920, 1080, False, 59500, 60500, 88, 44, 148, 4, 5, 36, True, True),
+    (1920, 1080, False, 49500, 50500, 528, 44, 148, 4, 5, 36, True, True),
+    (1920, 1080, False, 47500, 48500, 638, 44, 148, 4, 5, 36, True, True),
+    (1920, 1080, False, 29500, 30500, 88, 44, 148, 4, 5, 36, True, True),
+    (1920, 1080, False, 24500, 25500, 528, 44, 148, 4, 5, 36, True, True),
+    (1920, 1080, False, 23500, 24500, 638, 44, 148, 4, 5, 36, True, True),
+    (1920, 1080, True, 119500, 120500, 88, 44, 148, 4, 10, 31, True, True),
+    (1920, 1080, True, 99500, 100500, 528, 44, 148, 4, 10, 31, True, True),
+    (1920, 1080, True, 59500, 60500, 88, 44, 148, 4, 10, 31, True, True),
+    (1920, 1080, True, 49500, 50500, 528, 44, 148, 4, 10, 31, True, True),
+    (1600, 900, False, 59500, 60500, 24, 80, 96, 1, 3, 96, True, True),
+    (1366, 768, False, 59500, 60500, 70, 143, 213, 3, 3, 24, True, True),
+    (1360, 768, False, 59500, 60500, 64, 112, 256, 3, 6, 18, True, True),
+    (1280, 720, False, 119500, 120500, 110, 40, 220, 5, 5, 20, True, True),
+    (1280, 720, False, 99500, 100500, 440, 40, 220, 5, 5, 20, True, True),
+    (1280, 720, False, 59500, 60500, 110, 40, 220, 5, 5, 20, True, True),
+    (1280, 720, False, 49500, 50500, 440, 40, 220, 5, 5, 20, True, True),
+    (1280, 720, False, 47500, 48500, 960, 40, 220, 5, 5, 20, True, True),
+    (1280, 720, False, 29500, 30500, 1760, 40, 220, 5, 5, 20, True, True),
+    (1280, 720, False, 24500, 25500, 2420, 40, 220, 5, 5, 20, True, True),
+    (1280, 720, False, 23500, 24500, 1760, 40, 220, 5, 5, 20, True, True),
+    (1440, 576, True, 49500, 50500, 24, 126, 138, 4, 6, 39, False, False),
+    (1440, 480, True, 59500, 60500, 38, 124, 114, 8, 6, 31, False, False),
+    (720, 576, False, 49500, 50500, 12, 64, 68, 5, 5, 39, False, False),
+    (720, 480, False, 59500, 60500, 16, 62, 60, 9, 6, 30, False, False),
+    (640, 480, False, 59500, 60500, 16, 96, 48, 10, 2, 33, False, False),
+]
+
+TOASTYX_AUTO_CRT = [
+    (1920, 1440, False, 74500, 75500, 144, 224, 352, 1, 3, 56, False, True),
+    (1920, 1440, False, 59500, 60500, 128, 208, 344, 1, 3, 56, False, True),
+    (1856, 1392, False, 74500, 75500, 128, 224, 352, 1, 3, 104, False, True),
+    (1856, 1392, False, 59500, 60500, 96, 224, 352, 1, 3, 43, False, True),
+    (1792, 1344, False, 74500, 75500, 96, 216, 352, 1, 3, 69, False, True),
+    (1792, 1344, False, 59500, 60500, 128, 200, 328, 1, 3, 46, False, True),
+    (1600, 1200, False, 84500, 85500, 64, 192, 304, 1, 3, 46, True, True),
+    (1600, 1200, False, 74500, 75500, 64, 192, 304, 1, 3, 46, True, True),
+    (1600, 1200, False, 69500, 70500, 64, 192, 304, 1, 3, 46, True, True),
+    (1600, 1200, False, 64500, 65500, 64, 192, 304, 1, 3, 46, True, True),
+    (1600, 1200, False, 59500, 60500, 64, 192, 304, 1, 3, 46, True, True),
+    (1280, 1024, False, 84500, 85500, 64, 160, 224, 1, 3, 44, True, True),
+    (1280, 1024, False, 74500, 75500, 16, 144, 248, 1, 3, 38, True, True),
+    (1280, 1024, False, 59500, 60500, 48, 112, 248, 1, 3, 38, True, True),
+    (1280, 960, False, 84500, 85500, 64, 160, 224, 1, 3, 47, True, True),
+    (1280, 960, False, 59500, 60500, 96, 112, 312, 1, 3, 36, True, True),
+    (1152, 864, False, 74500, 75500, 64, 128, 256, 1, 3, 32, True, True),
+    (1024, 768, False, 84500, 85500, 48, 96, 208, 1, 3, 36, True, True),
+    (1024, 768, False, 74500, 75500, 16, 96, 176, 1, 3, 28, True, True),
+    (1024, 768, False, 69500, 70500, 24, 136, 144, 3, 6, 29, False, False),
+    (1024, 768, False, 59500, 60500, 24, 136, 160, 3, 6, 29, False, False),
+    (800, 600, False, 84500, 85500, 32, 64, 152, 1, 3, 27, True, True),
+    (800, 600, False, 74500, 75500, 16, 80, 160, 1, 3, 21, True, True),
+    (800, 600, False, 71500, 72500, 56, 120, 64, 37, 6, 23, True, True),
+    (800, 600, False, 59500, 60500, 40, 128, 88, 1, 4, 23, True, True),
+    (800, 600, False, 55500, 56500, 24, 72, 128, 1, 2, 22, True, True),
+    (1440, 576, True, 49500, 50500, 24, 126, 138, 4, 6, 39, False, False),
+    (1440, 480, True, 59500, 60500, 38, 124, 114, 8, 6, 31, False, False),
+    (720, 576, False, 49500, 50500, 12, 64, 68, 5, 5, 39, False, False),
+    (720, 480, False, 59500, 60500, 16, 62, 60, 9, 6, 30, False, False),
+    (640, 480, False, 84500, 85500, 56, 56, 80, 1, 3, 25, False, False),
+    (640, 480, False, 74500, 75500, 16, 64, 120, 1, 3, 16, False, False),
+    (640, 480, False, 71500, 72500, 24, 40, 128, 9, 3, 28, False, False),
+    (640, 480, False, 59500, 60500, 16, 96, 48, 10, 2, 33, False, False),
+]
+
+TOASTYX_NATIVE = [
+    (1920, 1080, False, 60000),
+    (1920, 1080, True, 60000),
+    (1600, 900, False, 60000),
+    (1366, 768, False, 59789),
+    (1360, 768, False, 60015),
+    (1280, 720, False, 60000),
+    (1440, 576, True, 50000),
+    (1440, 480, True, 59940),
+    (720, 576, False, 50000),
+    (720, 480, False, 59940),
+    (640, 480, False, 60000),
+]
+
+TOASTYX_ASPECT_VSYNC = [
+    (2205, 2295, 5),  # 16:9 (2250)
+    (2352, 2448, 7),  # 15:9 (2400)
+    (2450, 2550, 6),  # 16:10 (2500)
+    (2940, 3060, 4),  # 4:3 (3000)
+    (3136, 3264, 7),  # 5:4 (3200)
+]
+
+CPRIME = 30
+MPRIME = 300
+MIN_TIME_CVT = 550_000_000
+MIN_TIME_CVTRB = 460_000_000
+MIN_TIME_CVTRB2 = 460_000_000
+MIN_TIME_GTF = 550_000_000
+
+
+
+def _toast_aspect_vsync(hactive: int, vactive_frame: int, fields: int) -> int:
+    if hactive <= 0:
+        return 10 * fields
+    aspect = (vactive_frame * 4000) // hactive
+    for lo, hi, vs in TOASTYX_ASPECT_VSYNC:
+        if lo <= aspect <= hi:
+            return vs * fields
+    return 10 * fields
+
+
+def _toast_vrate_divisor(fields: int, pclk_prec: int = 100) -> int:
+    return (1_000_000_000 * fields) // pclk_prec
+
+
+def _toast_hrate_divisor(pclk_prec: int = 100) -> int:
+    return 1_000_000 // pclk_prec
+
+
+def _toast_actual_pclk_from_vrate(vrate_mhz: int, htotal: int, vtotal_frame: int, fields: int, pclk_prec: int = 100) -> int:
+    if vrate_mhz <= 0:
+        return 1
+    div = _toast_vrate_divisor(fields, pclk_prec)
+    return (vrate_mhz * htotal * vtotal_frame + (div - 1)) // div
+
+
+def _toast_actual_vrate(actual_pclk: int, htotal: int, vtotal_frame: int, fields: int, pclk_prec: int = 100) -> int:
+    if htotal <= 0 or vtotal_frame <= 0:
+        return 0
+    return (actual_pclk * _toast_vrate_divisor(fields, pclk_prec)) // htotal // vtotal_frame
+
+
+def _toast_actual_hrate(actual_pclk: int, htotal: int, pclk_prec: int = 100) -> int:
+    if htotal <= 0:
+        return 0
+    return (actual_pclk * _toast_hrate_divisor(pclk_prec)) // htotal
+
+
+def _toast_calc_cvt_pass(hactive: int, vactive_frame: int, vrate_mhz: int, interlaced: bool, pclk_prec: int = 100):
+    fields = 2 if interlaced else 1
+    int_bit = 1 if interlaced else 0
+    vfront = 3 * fields
+    vsync = _toast_aspect_vsync(hactive, vactive_frame, fields)
+    denom = vactive_frame + vfront + int_bit
+    hperiod = ((1_000_000_000_000_000 * fields) // max(1, vrate_mhz) - MIN_TIME_CVT * fields) // max(1, denom)
+    if hperiod <= 0:
+        hperiod = 1
+    vsync_vback = MIN_TIME_CVT // hperiod + 1
+    vback = vsync_vback * fields + int_bit - vsync
+    if vback < 6 * fields + int_bit:
+        vback = 6 * fields + int_bit
+
+    ideal_duty = CPRIME * 1_000_000_000 - MPRIME * hperiod
+    if ideal_duty < 20_000_000_000:
+        ideal_duty = 20_000_000_000
+    hblank = (hactive * ideal_duty // (100_000_000_000 - ideal_duty)) // 16 * 16
+    hblank = max(32, int(hblank))
+    hsync = ((hactive + hblank) // 100) * 8
+    hback = hblank // 2
+    hfront = hback - hsync
+    if hfront < 1:
+        hfront = 8
+        hblank = (hfront + hsync) * 2
+        hback = hblank - hfront - hsync
+
+    htotal = hactive + hblank
+    vblank = vfront + vsync + vback
+    vtotal = vactive_frame + vblank
+
+    mult = 1_000_000 * pclk_prec
+    step = max(1, pclk_prec // 4)
+    actual_pclk = ((htotal * mult) // hperiod) // step * step
+    return hfront, hsync, hback, hblank, htotal, vfront, vsync, vback, vblank, vtotal, actual_pclk, False, True
+
+
+def _toast_calc_cvtrb_pass(hactive: int, vactive_frame: int, vrate_mhz: int, interlaced: bool, pclk_prec: int = 100):
+    fields = 2 if interlaced else 1
+    int_bit = 1 if interlaced else 0
+    hfront, hsync, hback = 48, 32, 80
+    hblank = 160
+    htotal = hactive + hblank
+    vfront = 3 * fields
+    vsync = _toast_aspect_vsync(hactive, vactive_frame, fields)
+    hperiod = ((1_000_000_000_000_000 * fields) // max(1, vrate_mhz) - MIN_TIME_CVTRB * fields) // max(1, vactive_frame)
+    if hperiod <= 0:
+        hperiod = 1
+    vblank_f = MIN_TIME_CVTRB // hperiod + 1
+    vback = vblank_f * fields + int_bit - vfront - vsync
+    if vback < 6 * fields + int_bit:
+        vback = 6 * fields + int_bit
+    vblank = vfront + vsync + vback
+    vtotal = vactive_frame + vblank
+    div = _toast_vrate_divisor(fields, pclk_prec)
+    step = max(1, pclk_prec // 4)
+    actual_pclk = ((vrate_mhz * htotal * vtotal) // div) // step * step
+    return hfront, hsync, hback, hblank, htotal, vfront, vsync, vback, vblank, vtotal, actual_pclk, True, False
+
+
+def _toast_calc_cvtrb2_pass(hactive: int, vactive_frame: int, vrate_mhz: int, interlaced: bool, pclk_prec: int = 100):
+    fields = 2 if interlaced else 1
+    int_bit = 1 if interlaced else 0
+    hfront, hsync, hback = 8, 32, 40
+    hblank = 80
+    htotal = hactive + hblank
+    vsync = 8 * fields
+    vback = 6 * fields + int_bit
+    hperiod = ((1_000_000_000_000_000 * fields) // max(1, vrate_mhz) - MIN_TIME_CVTRB2 * fields) // max(1, vactive_frame)
+    if hperiod <= 0:
+        hperiod = 1
+    vblank_f = MIN_TIME_CVTRB2 // hperiod + 1
+    vfront = vblank_f * fields + int_bit - vsync - vback
+    if vfront < 1 * fields:
+        vfront = 1 * fields
+    vblank = vfront + vsync + vback
+    vtotal = vactive_frame + vblank
+    div = _toast_vrate_divisor(fields, pclk_prec)
+    actual_pclk = (vrate_mhz * htotal * vtotal) // div
+    return hfront, hsync, hback, hblank, htotal, vfront, vsync, vback, vblank, vtotal, actual_pclk, True, False
+
+def _toast_calc_gtf_pass(hactive: int, vactive_frame: int, vrate_mhz: int, interlaced: bool, pclk_prec: int = 100):
+    fields = 2 if interlaced else 1
+    int_bit = 1 if interlaced else 0
+    vfront = 1 * fields
+    vsync = 3 * fields
+    denom = vactive_frame + vfront + int_bit
+    hperiod = ((1_000_000_000_000_000 * fields) // max(1, vrate_mhz) - MIN_TIME_GTF * fields) // max(1, denom)
+    if hperiod <= 0:
+        hperiod = 1
+    vsync_vback = ((MIN_TIME_GTF * 2) // hperiod + 1) // 2
+    vback = vsync_vback * fields + int_bit - vsync
+    if vback < 1 * fields + int_bit:
+        vback = 1 * fields + int_bit
+
+    ideal_duty = CPRIME * 1_000_000_000 - MPRIME * hperiod
+    if ideal_duty < 20_000_000_000:
+        ideal_duty = 20_000_000_000
+    hblank = ((hactive * ideal_duty // (100_000_000_000 - ideal_duty)) + 8) // 16 * 16
+    hblank = max(32, int(hblank))
+    hsync = ((hactive + hblank + 50) // 100) * 8
+    hback = hblank // 2
+    hfront = hback - hsync
+    if hfront < 1:
+        hfront = 8
+        hblank = (hfront + hsync) * 2
+        hback = hblank - hfront - hsync
+
+    htotal = hactive + hblank
+    vblank = vfront + vsync + vback
+    vtotal = vactive_frame + vblank
+    div = _toast_vrate_divisor(fields, pclk_prec)
+    actual_pclk = (vrate_mhz * htotal * vtotal + div // 2) // div
+    return hfront, hsync, hback, hblank, htotal, vfront, vsync, vback, vblank, vtotal, actual_pclk, False, True
+
+
+def _toast_two_pass_standard(pass_fn, hactive: int, vactive_frame: int, vrate_mhz: int, interlaced: bool, pclk_prec: int = 100):
+    fields = 2 if interlaced else 1
+    hfr, hsy, hbck, hblk, htot, vfr, vsy, vbck, vblk, vtot, _, hpol, vpol = pass_fn(
+        hactive, vactive_frame, vrate_mhz, interlaced, pclk_prec
+    )
+    pclk1 = _toast_actual_pclk_from_vrate(vrate_mhz, htot, vtot, fields, pclk_prec)
+    vrate1 = _toast_actual_vrate(pclk1, htot, vtot, fields, pclk_prec)
+    hfr, hsy, hbck, hblk, htot, vfr, vsy, vbck, vblk, vtot, _, hpol, vpol = pass_fn(
+        hactive, vactive_frame, max(1, vrate1), interlaced, pclk_prec
+    )
+    actual_pclk = _toast_actual_pclk_from_vrate(max(1, vrate1), htot, vtot, fields, pclk_prec)
+    return hfr, hsy, hbck, hblk, htot, vfr, vsy, vbck, vblk, vtot, actual_pclk, hpol, vpol
+
+
+def _toast_lookup_table(table, hactive: int, vactive_frame: int, interlaced: bool, vrate_mhz: int):
+    for row in table:
+        ha, va, il, min_vr, max_vr, hfr, hsy, hbck, vfr, vsy, vbck, hpol, vpol = row
+        if ha == hactive and va == vactive_frame and bool(il) == bool(interlaced):
+            if min_vr <= vrate_mhz <= max_vr:
+                return hfr, hsy, hbck, vfr, vsy, vbck, bool(hpol), bool(vpol)
+    return None
+
+
+def _toast_lookup_native_vrate(hactive: int, vactive_frame: int, interlaced: bool) -> int:
+    for ha, va, il, vr in TOASTYX_NATIVE:
+        if ha == hactive and va == vactive_frame and bool(il) == bool(interlaced):
+            return vr
+    return 60000
+
+def calculate_timings(preset_name: str, hactive: int, vactive: int, refresh_hz: float, interlaced: bool, pclk_prec: int = 100) -> dict:
+    """
+    Calculates timings using ToastyX CRU's exact formulas (DetailedResolutionClass).
+    Preserves decimal points and ToastyX half-line (.5) interlaced reductions:
+      - In ToastyX CRU, CVT Standard / CVT-RB / GTF interlaced timings reduce VBack and VBlank/VTotal
+        by 0.5 lines (so VFront = VFront_field + 0.5, VBack = VBack_field - 0.5, and VBlank/VTotal
+        are 0.5 lower in per-field view / 0.5 lower on two timing fields in full-frame view).
+    """
+    if preset_name == "CVT-RB":
+        preset_name = "CVT-RB Standard"
+    elif preset_name == "CVT-RB2":
+        preset_name = "CVT-RB2 Standard"
+
+    hactive = max(64, int(hactive))
+    vactive_frame = max(64, int(vactive))
+    if interlaced and vactive_frame % 2 != 0:
+        vactive_frame += 1
+
+    fields = 2 if interlaced else 1
+    vrate_mhz = max(1000, int(round(float(refresh_hz) * 1000.0)))
+
+    matched = None
+    if preset_name == "Native PC":
+        nat_vr = _toast_lookup_native_vrate(hactive, vactive_frame, interlaced)
+        matched = _toast_lookup_table(TOASTYX_AUTO_PC, hactive, vactive_frame, interlaced, nat_vr)
+        if matched is None:
+            hfr, hsy, hbck, hblk, htot, vfr, vsy, vbck, vblk, vtot, _, hpol, vpol = _toast_two_pass_standard(
+                _toast_calc_cvtrb_pass, hactive, vactive_frame, nat_vr, interlaced, pclk_prec
+            )
+            matched = (hfr, hsy, hbck, vfr, vsy, vbck, hpol, vpol)
+        vrate_mhz = nat_vr
+
+    elif preset_name == "Native HDTV":
+        nat_vr = _toast_lookup_native_vrate(hactive, vactive_frame, interlaced)
+        matched = _toast_lookup_table(TOASTYX_AUTO_HDTV, hactive, vactive_frame, interlaced, nat_vr)
+        if matched is None:
+            hfr, hsy, hbck, hblk, htot, vfr, vsy, vbck, vblk, vtot, _, hpol, vpol = _toast_two_pass_standard(
+                _toast_calc_cvtrb_pass, hactive, vactive_frame, nat_vr, interlaced, pclk_prec
+            )
+            matched = (hfr, hsy, hbck, vfr, vsy, vbck, hpol, vpol)
+        vrate_mhz = nat_vr
+
+    elif preset_name == "Automatic PC":
+        matched = _toast_lookup_table(TOASTYX_AUTO_PC, hactive, vactive_frame, interlaced, vrate_mhz)
+        if matched is None:
+            hfr, hsy, hbck, hblk, htot, vfr, vsy, vbck, vblk, vtot, actual_pclk, hpol, vpol = _toast_two_pass_standard(
+                _toast_calc_cvtrb_pass, hactive, vactive_frame, vrate_mhz, interlaced, pclk_prec
+            )
+
+    elif preset_name == "Automatic HDTV":
+        matched = _toast_lookup_table(TOASTYX_AUTO_HDTV, hactive, vactive_frame, interlaced, vrate_mhz)
+        if matched is None:
+            hfr, hsy, hbck, hblk, htot, vfr, vsy, vbck, vblk, vtot, actual_pclk, hpol, vpol = _toast_two_pass_standard(
+                _toast_calc_cvtrb_pass, hactive, vactive_frame, vrate_mhz, interlaced, pclk_prec
+            )
+
+    elif preset_name == "Automatic CRT":
+        matched = _toast_lookup_table(TOASTYX_AUTO_CRT, hactive, vactive_frame, interlaced, vrate_mhz)
+        if matched is None:
+            hfr, hsy, hbck, hblk, htot, vfr, vsy, vbck, vblk, vtot, actual_pclk, hpol, vpol = _toast_two_pass_standard(
+                _toast_calc_cvt_pass, hactive, vactive_frame, vrate_mhz, interlaced, pclk_prec
+            )
+
+    elif preset_name == "CVT Standard":
+        hfr, hsy, hbck, hblk, htot, vfr, vsy, vbck, vblk, vtot, actual_pclk, hpol, vpol = _toast_two_pass_standard(
+            _toast_calc_cvt_pass, hactive, vactive_frame, vrate_mhz, interlaced, pclk_prec
+        )
+
+    elif preset_name == "CVT-RB Standard":
+        hfr, hsy, hbck, hblk, htot, vfr, vsy, vbck, vblk, vtot, actual_pclk, hpol, vpol = _toast_two_pass_standard(
+            _toast_calc_cvtrb_pass, hactive, vactive_frame, vrate_mhz, interlaced, pclk_prec
+        )
+
+    elif preset_name == "CVT-RB2 Standard":
+        hfr, hsy, hbck, hblk, htot, vfr, vsy, vbck, vblk, vtot, actual_pclk, hpol, vpol = _toast_two_pass_standard(
+            _toast_calc_cvtrb2_pass, hactive, vactive_frame, vrate_mhz, interlaced, pclk_prec
+        )
+
+    elif preset_name == "GTF Standard":
+        hfr, hsy, hbck, hblk, htot, vfr, vsy, vbck, vblk, vtot, actual_pclk, hpol, vpol = _toast_two_pass_standard(
+            _toast_calc_gtf_pass, hactive, vactive_frame, vrate_mhz, interlaced, pclk_prec
+        )
+    elif preset_name == "Exact":
+        hpol, vpol = True, False
+        hfr, hsy = 48, 32
+        htot = ((hactive + hfr + hsy + 160) // 160 * 160) if interlaced else ((hactive + hfr + hsy + 80) // 80 * 80)
+        hbck = htot - hactive - hfr - hsy
+        hblk = hfr + hsy + hbck
+        vfr = 3 * fields
+        vsy = _toast_aspect_vsync(hactive, vactive_frame, fields)
+        vtot = ((vactive_frame + vfr + vsy + 125) // 250 * 250 + 125) if interlaced else ((vactive_frame + vfr + vsy + 125) // 125 * 125)
+        vbck = vtot - vactive_frame - vfr - vsy
+        vblk = vfr + vsy + vbck
+        actual_pclk = _toast_actual_pclk_from_vrate(vrate_mhz, htot, vtot, fields, pclk_prec)
+
+    elif preset_name == "Exact CRT":
+        hfr, hsy, hbck, hblk, htot, vfr, vsy, vbck, vblk, vtot, _, hpol, vpol = _toast_two_pass_standard(
+            _toast_calc_cvt_pass, hactive, vactive_frame, vrate_mhz, interlaced, pclk_prec
+        )
+        if interlaced:
+            htot = (htot + 159) // 160 * 160
+            vtot = (vtot + 124) // 250 * 250 + 125
+        else:
+            htot = (htot + 79) // 80 * 80
+            vtot = (vtot + 124) // 125 * 125
+        hbck = htot - hactive - hfr - hsy
+        hblk = hfr + hsy + hbck
+        vbck = vtot - vactive_frame - vfr - vsy
+        vblk = vfr + vsy + vbck
+        actual_pclk = _toast_actual_pclk_from_vrate(vrate_mhz, htot, vtot, fields, pclk_prec)
 
     else:
-        hsync_pos, vsync_pos = False, True
-        if interlaced:
-            vfront, vsync = 6, 8
-            vblank = max(vfront + vsync + 20, int(round(vactive * 0.1015)))
-        else:
-            vfront, vsync = 3, 4
-            vblank = max(vfront + vsync + 14, int(round(vactive * 0.05)))
-        hblank = max(32, int(round(hactive * 0.35 / 16.0)) * 16)
-        htotal = hactive + hblank
-        hsync = max(8, int(round(htotal * 0.08 / 8.0)) * 8)
-        hfront = max(8, (hblank // 2) - hsync)
+        hfr, hsy, hbck, hblk, htot, vfr, vsy, vbck, vblk, vtot, actual_pclk, hpol, vpol = _toast_two_pass_standard(
+            _toast_calc_cvt_pass, hactive, vactive_frame, vrate_mhz, interlaced, pclk_prec
+        )
 
-    if interlaced and vblank % 2 != 0:
-        vblank += 1
-    htotal, vtotal = hactive + hblank, vactive + vblank
-    pclk_mhz = round((frame_rate * htotal * vtotal) / 1_000_000.0, 2)
+    if matched is not None:
+        hfr, hsy, hbck, vfr, vsy, vbck, hpol, vpol = matched
+        hblk = hfr + hsy + hbck
+        htot = hactive + hblk
+        vblk = vfr + vsy + vbck
+        vtot = vactive_frame + vblk
+        actual_pclk = _toast_actual_pclk_from_vrate(vrate_mhz, htot, vtot, fields, pclk_prec)
+
+    actual_vrate_mhz = _toast_actual_vrate(actual_pclk, htot, vtot, fields, pclk_prec)
+    actual_hrate_hz = _toast_actual_hrate(actual_pclk, htot, pclk_prec)
+    pclk_mhz = round(actual_pclk / float(pclk_prec), 3 if pclk_prec == 1000 else 2)
+    actual_vrate_hz = round(actual_vrate_mhz / 1000.0, 3)
+    target_vrate_hz = round(vrate_mhz / 1000.0, 3)
+    hscan_khz = round(actual_hrate_hz / 1000.0, 3)
+
+    if interlaced:
+        vfront_dec = float(vfr)
+        vsync_dec = float(vsy)
+        # Preserve the .5 reduction on VBack and VBlank/VTotal from CVT/GTF interlaced formula:
+        vback_dec = round(float(vbck) - 0.5, 1)
+        vblank_dec = round(float(vblk) - 0.5, 1)
+        vtotal_dec = round(float(vtot) - 0.5, 1)
+        vfront_int = max(2, (int(vfr) // 2) * 2)
+        vsync_int = max(2, (int(vsy) // 2) * 2)
+        vblank_int = max(vfront_int + vsync_int + 2, (int(vblk) // 2) * 2)
+        vback_int = max(2, vblank_int - vfront_int - vsync_int)
+        vtotal_int = vactive_frame + vblank_int
+    else:
+        vfront_dec = float(vfr)
+        vsync_dec = float(vsy)
+        vback_dec = float(vbck)
+        vblank_dec = float(vblk)
+        vtotal_dec = float(vtot)
+        vfront_int = int(vfr)
+        vsync_int = int(vsy)
+        vback_int = int(vbck)
+        vblank_int = int(vblk)
+        vtotal_int = int(vtot)
+
     return {
-        "type": "dtd", "pclk_mhz": pclk_mhz,
-        "hactive": hactive, "hblank": hblank, "hfront": hfront, "hsync": hsync,
-        "vactive": vactive, "vblank": vblank, "vfront": vfront, "vsync": vsync,
-        "interlaced": interlaced, "hsync_pos": hsync_pos, "vsync_pos": vsync_pos,
-        "vrefresh": refresh_hz, "hscan_khz": (pclk_mhz * 1000.0) / htotal if htotal else 0.0,
+        "type": "dtd",
+        "preset": preset_name,
+        "pclk_mhz": pclk_mhz,
+        "hactive": int(hactive),
+        "hblank": int(hblk),
+        "hfront": int(hfr),
+        "hsync": int(hsy),
+        "hback": int(hbck),
+        "htotal": int(htot),
+        "vactive": int(vactive_frame),
+        "vblank": int(vblank_int),
+        "vfront": int(vfront_int),
+        "vsync": int(vsync_int),
+        "vback": int(vback_int),
+        "vtotal": int(vtotal_int),
+        "vfront_dec": vfront_dec,
+        "vsync_dec": vsync_dec,
+        "vback_dec": vback_dec,
+        "vblank_dec": vblank_dec,
+        "vtotal_dec": vtotal_dec,
+        "toast_vfront": int(vfr),
+        "toast_vsync": int(vsy),
+        "toast_vback": int(vbck),
+        "toast_vblank": int(vblk),
+        "toast_vtotal": int(vtot),
+        "interlaced": bool(interlaced),
+        "hsync_pos": bool(hpol),
+        "vsync_pos": bool(vpol),
+        "vrefresh": target_vrate_hz,
+        "actual_vrefresh": actual_vrate_hz,
+        "hscan_khz": hscan_khz,
     }
 
 
-def detect_timing_preset(d):
+def detect_timing_preset(d: dict) -> str:
     if d.get("type") != "dtd":
         return "Automatic CRT"
-    hz = round(d.get("vrefresh", 60.0), 2)
-    for p in ("Automatic CRT", "Automatic PC", "Automatic HDTV", "CVT Standard", "CVT-RB", "CVT-RB2", "GTF Standard"):
+    if d.get("preset") in TIMING_PRESETS:
+        return d["preset"]
+    hz = round(float(d.get("vrefresh", 60.0)), 3)
+    for p in (
+        "Automatic CRT",
+        "Automatic PC",
+        "Automatic HDTV",
+        "CVT Standard",
+        "CVT-RB Standard",
+        "CVT-RB2 Standard",
+        "GTF Standard",
+        "Exact",
+        "Exact CRT",
+    ):
         c = calculate_timings(p, d["hactive"], d["vactive"], hz, d["interlaced"])
-        if all(c[k] == d[k] for k in ("hblank", "hfront", "hsync", "vblank", "vfront", "vsync", "hsync_pos", "vsync_pos")):
+        if all(
+            c[k] == d.get(k)
+            for k in ("hblank", "hfront", "hsync", "vblank", "vfront", "vsync", "hsync_pos", "vsync_pos")
+        ):
             return p
     return "Manual"
+
+
 
 
 def decode_std_timings(b):
@@ -280,7 +867,7 @@ def decode_dtd(block, full_edid=None):
     vrefresh = (pclk_mhz * 1_000_000.0 * mult) / (htotal * vtotal) if (htotal and vtotal) else 0.0
     hscan_khz = (pclk_mhz * 1000.0) / htotal if htotal else 0.0
 
-    return {
+    res = {
         "type": "dtd", "pclk_mhz": pclk_mhz,
         "hactive": hactive, "hblank": hblank, "hfront": hfront, "hsync": hsync,
         "vactive": vactive, "vblank": vblank, "vfront": vfront, "vsync": vsync,
@@ -288,6 +875,16 @@ def decode_dtd(block, full_edid=None):
         "vrefresh": vrefresh, "hscan_khz": hscan_khz,
         "cru_field_bug": interlaced and (vactive <= hactive * 0.45)
     }
+    preset_match = detect_timing_preset(res)
+    if preset_match != "Manual":
+        calc = calculate_timings(preset_match, hactive, vactive, round(vrefresh, 2), interlaced)
+        res["preset"] = preset_match
+        res["vfront_dec"] = calc["vfront_dec"]
+        res["vsync_dec"] = calc["vsync_dec"]
+        res["vback_dec"] = calc["vback_dec"]
+        res["vblank_dec"] = calc["vblank_dec"]
+        res["vtotal_dec"] = calc["vtotal_dec"]
+    return res
 
 
 def encode_dtd(d, existing_block=None):
@@ -377,75 +974,231 @@ class StandardResDialog(QDialog):
     def __init__(self, parent, initial=None):
         super().__init__(parent)
         self.setWindowTitle("Standard Resolution")
-        self.setMinimumWidth(340)
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
+        self.setMinimumSize(390, 310)
+        self.resize(450, 355)
+        self._updating = False
 
-        self.mode_combo = QComboBox()
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer_layout.addWidget(scroll, 1)
+
+        content = QWidget()
+        content.setObjectName("dialogContent")
+        scroll.setWidget(content)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        cfg_group = QGroupBox("Standard Resolution && Refresh Rate")
+        grid = QGridLayout(cfg_group)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(10)
+        grid.setColumnStretch(1, 1)
+
+        self.mode_combo = NoWheelComboBox()
         for label, _, _ in STD_PRESETS:
             self.mode_combo.addItem(label)
-        self.mode_combo.addItem("Custom (Multiple of 8)")
-        form.addRow("Resolution:", self.mode_combo)
+        self.mode_combo.addItem("Custom — By Aspect Ratio (Auto Height from Width)")
+        self.mode_combo.addItem("Custom — Full Resolution (Set Width × Height)")
 
-        self.width_sb = QSpinBox()
+        self.width_sb = NoWheelSpinBox()
         self.width_sb.setRange(256, 2288)
         self.width_sb.setSingleStep(8)
+        self.width_sb.setSuffix(" px")
         self.width_sb.setValue(initial["w"] if initial else 1600)
-        form.addRow("Width (px):", self.width_sb)
 
-        self.ar_combo = QComboBox()
-        self.ar_combo.addItems(["16:10", "4:3", "5:4", "16:9"])
-        self.ar_combo.setCurrentIndex(initial["ar_idx"] if initial else 1)
-        form.addRow("Aspect Ratio:", self.ar_combo)
+        self.ar_combo = NoWheelComboBox()
+        self.ar_combo.addItems(["16:10", "4:3", "5:4", "16:9", "Custom (From Width × Height)"])
+        init_ar_idx = initial["ar_idx"] if (initial and 0 <= initial.get("ar_idx", 1) <= 3) else 1
+        self.ar_combo.setCurrentIndex(init_ar_idx)
 
-        self.hz_sb = QSpinBox()
+        self.height_sb = NoWheelSpinBox()
+        self.height_sb.setRange(160, 2048)
+        self.height_sb.setSingleStep(2)
+        self.height_sb.setSuffix(" px")
+        init_h = initial["h"] if initial else (1600 * ASPECT_MAP[init_ar_idx][1]) // ASPECT_MAP[init_ar_idx][2]
+        self.height_sb.setValue(init_h)
+
+        self.hz_sb = NoWheelSpinBox()
         self.hz_sb.setRange(60, 123)
         self.hz_sb.setSuffix(" Hz")
         self.hz_sb.setValue(initial["hz"] if initial else 85)
-        form.addRow("Refresh Rate (60-123 Hz):", self.hz_sb)
 
-        layout.addLayout(form)
+        grid.addWidget(QLabel("<b>Mode / Preset:</b>"), 0, 0)
+        grid.addWidget(self.mode_combo, 0, 1)
+        grid.addWidget(QLabel("<b>Horizontal (Width):</b>"), 1, 0)
+        grid.addWidget(self.width_sb, 1, 1)
+        grid.addWidget(QLabel("<b>Aspect Ratio:</b>"), 2, 0)
+        grid.addWidget(self.ar_combo, 2, 1)
+        grid.addWidget(QLabel("<b>Vertical (Height):</b>"), 3, 0)
+        grid.addWidget(self.height_sb, 3, 1)
+        grid.addWidget(QLabel("<b>Refresh Rate:</b>"), 4, 0)
+        grid.addWidget(self.hz_sb, 4, 1)
+        layout.addWidget(cfg_group)
 
-        btns = QHBoxLayout()
-        ok_btn = QPushButton("OK")
+        self.preview_lbl = AutoWrapLabel()
+        self.preview_lbl.setObjectName("summaryMono")
+        layout.addWidget(self.preview_lbl)
+
+        btn_bar = QFrame()
+        btn_bar.setObjectName("dialogBtnBar")
+        btns = QHBoxLayout(btn_bar)
+        btns.setContentsMargins(14, 10, 14, 10)
+        btns.setSpacing(8)
+        ok_btn = QPushButton("✓ Save Resolution")
+        ok_btn.setObjectName("primaryBtn")
         ok_btn.clicked.connect(self.accept)
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
         btns.addStretch()
         btns.addWidget(cancel_btn)
         btns.addWidget(ok_btn)
-        layout.addLayout(btns)
+        outer_layout.addWidget(btn_bar, 0)
 
         self.mode_combo.currentIndexChanged.connect(self.on_preset_changed)
+        self.width_sb.valueChanged.connect(self.on_width_or_ar_changed)
+        self.ar_combo.currentIndexChanged.connect(self.on_ar_changed)
+        self.height_sb.valueChanged.connect(self.on_height_changed)
+        self.hz_sb.valueChanged.connect(self._update_preview)
+
         if initial:
-            self.mode_combo.setCurrentIndex(len(STD_PRESETS))
+            ar_i = initial.get("ar_idx", 1)
+            _, num, den = ASPECT_MAP.get(ar_i, ("4:3", 3, 4))
+            expected_h = (initial["w"] * num) // den
+            if initial.get("h") and initial["h"] != expected_h:
+                self.mode_combo.setCurrentIndex(len(STD_PRESETS) + 1)
+            else:
+                self.mode_combo.setCurrentIndex(len(STD_PRESETS))
         else:
             self.on_preset_changed()
+        self._update_preview()
+
+    def _match_aspect_idx(self, w: int, h: int) -> int:
+        for ar_i, (_, num, den) in ASPECT_MAP.items():
+            if (w * num) // den == h:
+                return ar_i
+        return -1
 
     def on_preset_changed(self):
+        if self._updating:
+            return
+        self._updating = True
         idx = self.mode_combo.currentIndex()
-        is_custom = (idx == len(STD_PRESETS))
-        self.width_sb.setEnabled(is_custom)
-        self.ar_combo.setEnabled(is_custom)
-        if not is_custom:
+        is_preset = idx < len(STD_PRESETS)
+        is_by_ar = (idx == len(STD_PRESETS))
+        is_full_custom = (idx == len(STD_PRESETS) + 1)
+
+        self.width_sb.setEnabled(not is_preset)
+        self.ar_combo.setEnabled(is_by_ar or is_full_custom)
+        self.height_sb.setEnabled(is_full_custom)
+
+        if is_preset:
             _, w, ar_idx = STD_PRESETS[idx]
             self.width_sb.setValue(w)
             self.ar_combo.setCurrentIndex(ar_idx)
+            _, num, den = ASPECT_MAP[ar_idx]
+            self.height_sb.setValue((w * num) // den)
+        elif is_by_ar:
+            if self.ar_combo.currentIndex() > 3:
+                self.ar_combo.setCurrentIndex(1)
+            ar_idx = self.ar_combo.currentIndex()
+            w = (self.width_sb.value() // 8) * 8
+            _, num, den = ASPECT_MAP[ar_idx]
+            self.height_sb.setValue((w * num) // den)
+        self._updating = False
+        self._update_preview()
+
+    def on_width_or_ar_changed(self):
+        if self._updating:
+            return
+        self._updating = True
+        w = (self.width_sb.value() // 8) * 8
+        idx = self.mode_combo.currentIndex()
+        if idx <= len(STD_PRESETS) and self.ar_combo.currentIndex() <= 3:
+            ar_idx = self.ar_combo.currentIndex()
+            _, num, den = ASPECT_MAP[ar_idx]
+            self.height_sb.setValue((w * num) // den)
+        else:
+            matched_ar = self._match_aspect_idx(w, self.height_sb.value())
+            self.ar_combo.setCurrentIndex(matched_ar if matched_ar >= 0 else 4)
+        self._updating = False
+        self._update_preview()
+
+    def on_ar_changed(self):
+        if self._updating:
+            return
+        ar_idx = self.ar_combo.currentIndex()
+        if ar_idx <= 3:
+            self._updating = True
+            w = (self.width_sb.value() // 8) * 8
+            _, num, den = ASPECT_MAP[ar_idx]
+            self.height_sb.setValue((w * num) // den)
+            self._updating = False
+        else:
+            if self.mode_combo.currentIndex() != len(STD_PRESETS) + 1:
+                self.mode_combo.setCurrentIndex(len(STD_PRESETS) + 1)
+        self._update_preview()
+
+    def on_height_changed(self):
+        if self._updating:
+            return
+        self._updating = True
+        w = (self.width_sb.value() // 8) * 8
+        h = self.height_sb.value()
+        matched_ar = self._match_aspect_idx(w, h)
+        self.ar_combo.setCurrentIndex(matched_ar if matched_ar >= 0 else 4)
+        self._updating = False
+        self._update_preview()
+
+    def _update_preview(self):
+        w = (self.width_sb.value() // 8) * 8
+        h = self.height_sb.value()
+        hz = self.hz_sb.value()
+        matched_ar = self._match_aspect_idx(w, h)
+        if matched_ar >= 0:
+            ar_name = ASPECT_MAP[matched_ar][0]
+            note = f"Standard EDID Slot: {w} × {h} ({ar_name}) @ {hz} Hz"
+        else:
+            best_ar = min(ASPECT_MAP.keys(), key=lambda k: abs((w * ASPECT_MAP[k][1]) // ASPECT_MAP[k][2] - h))
+            ar_name, num, den = ASPECT_MAP[best_ar]
+            std_h = (w * num) // den
+            note = (
+                f"Selected: {w} × {h} @ {hz} Hz (Custom Vertical Resolution)\n"
+                f"Note: Standard 2-byte EDID slots only encode 4 aspect ratios (closest: {w}×{std_h} {ar_name}); "
+                f"saving will also offer adding {w}×{h}@{hz}Hz to a Detailed Resolution slot."
+            )
+        self.preview_lbl.setText(note)
 
     def get_result(self):
         w = (self.width_sb.value() // 8) * 8
-        ar_idx = self.ar_combo.currentIndex()
-        ar_name, num, den = ASPECT_MAP[ar_idx]
-        h = (w * num) // den
-        return {"w": w, "h": h, "hz": self.hz_sb.value(), "ar_idx": ar_idx, "ar_name": ar_name}
+        h = int(self.height_sb.value())
+        matched_ar = self._match_aspect_idx(w, h)
+        if matched_ar >= 0:
+            ar_idx = matched_ar
+            ar_name = ASPECT_MAP[ar_idx][0]
+            custom_h = False
+        else:
+            ar_idx = min(ASPECT_MAP.keys(), key=lambda k: abs((w * ASPECT_MAP[k][1]) // ASPECT_MAP[k][2] - h))
+            ar_name = f"{ASPECT_MAP[ar_idx][0]}*"
+            custom_h = True
+        return {"w": w, "h": h, "hz": self.hz_sb.value(), "ar_idx": ar_idx, "ar_name": ar_name, "custom_h": custom_h}
 
 
 class DTDEditorDialog(QDialog):
     def __init__(self, parent, initial_data):
         super().__init__(parent)
-        self.setWindowTitle("Detailed Resolution")
-        self.setMinimumWidth(400)
+        self.setWindowTitle("Detailed Resolution — ToastyX Timing & Manual Editor")
+        self.setMinimumSize(360, 420)
+        self.resize(620, 680)
         self._updating = False
+        self._resp_compact = None
+        self._last_hv_anchor = 0   # 0 = Back Porch, 1 = Blanking, 2 = Total
+        self._last_rate_anchor = 0 # 0 = Refresh Rate (VRate), 1 = H-Scan (HRate), 2 = Pixel Clock
 
         if initial_data.get("type") != "dtd":
             initial_data = calculate_timings("Automatic CRT", 1600, 1200, 85.0, False)
@@ -453,145 +1206,387 @@ class DTDEditorDialog(QDialog):
         else:
             initial_preset = detect_timing_preset(initial_data)
 
-        layout = QVBoxLayout(self)
-        top_group = QGroupBox("Timing & Target")
-        top_grid = QGridLayout(top_group)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
 
-        self.preset_combo = QComboBox()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer_layout.addWidget(scroll, 1)
+
+        content = QWidget()
+        content.setObjectName("dialogContent")
+        scroll.setWidget(content)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        top_group = QGroupBox("Timing Standard && Target Refresh")
+        self.top_grid = QGridLayout(top_group)
+        self.top_grid.setHorizontalSpacing(10)
+        self.top_grid.setVerticalSpacing(8)
+        self.top_grid.setColumnStretch(1, 1)
+
+        self.preset_combo = NoWheelComboBox()
         self.preset_combo.addItems(TIMING_PRESETS)
-        self.preset_combo.setCurrentText(initial_preset)
-        top_grid.addWidget(QLabel("Timing:"), 0, 0)
-        top_grid.addWidget(self.preset_combo, 0, 1, 1, 2)
+        self.preset_combo.setCurrentText(initial_preset if initial_preset in TIMING_PRESETS else "Manual")
+        self.preset_combo.setMinimumWidth(0)
+        self.preset_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
-        self.refresh_sb = QDoubleSpinBox()
-        self.refresh_sb.setRange(20.0, 500.0)
-        self.refresh_sb.setDecimals(2)
+        self.switch_manual_btn = QPushButton("✎ Switch to Manual")
+        self.switch_manual_btn.setObjectName("accentBtn")
+        self.switch_manual_btn.setMinimumWidth(0)
+        self.switch_manual_btn.setToolTip(
+            "Immediately switch from the current timing preset (GTF, CVT, Automatic, etc.) to Manual mode "
+            "while preserving every calculated timing field, decimal value, and frequency so you can fine-tune them."
+        )
+        self.switch_manual_btn.clicked.connect(self.switch_to_manual_preserving_values)
+
+        self.refresh_sb = NoWheelDoubleSpinBox(trim_trailing_zeros=False)
+        self.refresh_sb.setRange(10.0, 600.0)
+        self.refresh_sb.setDecimals(3)
         self.refresh_sb.setSingleStep(1.0)
         self.refresh_sb.setSuffix(" Hz")
+        self.refresh_sb.setMinimumWidth(0)
+        self.refresh_sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.refresh_sb.setValue(float(initial_data.get("vrefresh", 85.0)))
         self._saved_refresh_hz = self.refresh_sb.value()
         self._was_native = ("Native" in initial_preset)
-        top_grid.addWidget(QLabel("Refresh Rate:"), 1, 0)
-        top_grid.addWidget(self.refresh_sb, 1, 1)
 
         self.interlaced_cb = QCheckBox("Interlaced")
         self.interlaced_cb.setChecked(bool(initial_data.get("interlaced", False)))
-        top_grid.addWidget(self.interlaced_cb, 1, 2)
+        self.interlaced_cb.setToolTip(
+            "Enable Interlaced timing. In CVT/GTF/CVT-RB standards, vertical back porch and total/blanking "
+            "preserve ToastyX's exact 0.5-line reduction."
+        )
+
+        self.lbl_timing = QLabel("<b>Timing:</b>")
+        self.lbl_target_ref = QLabel("<b>Target Refresh:</b>")
         layout.addWidget(top_group)
 
-        param_group = QGroupBox("Parameters")
+        param_group = QGroupBox("Timing Parameters (Horizontal && Vertical)")
         pgrid = QGridLayout(param_group)
+        pgrid.setHorizontalSpacing(8)
+        pgrid.setVerticalSpacing(6)
+        pgrid.setColumnStretch(1, 1)
+        pgrid.setColumnStretch(2, 1)
+
         hdr_font = QFont()
         hdr_font.setBold(True)
-        h_hdr, v_hdr = QLabel("Horizontal (px)"), QLabel("Vertical (lines)")
-        h_hdr.setFont(hdr_font)
-        v_hdr.setFont(hdr_font)
-        pgrid.addWidget(h_hdr, 0, 1)
-        pgrid.addWidget(v_hdr, 0, 2)
+        self.h_hdr = QLabel("Horizontal (px)")
+        self.v_hdr = QLabel("Vertical (lines)")
+        self.h_hdr.setFont(hdr_font)
+        self.v_hdr.setFont(hdr_font)
+        pgrid.addWidget(self.h_hdr, 0, 1)
+        pgrid.addWidget(self.v_hdr, 0, 2)
 
-        def make_sb(lo, hi, val, step=1, sfx=""):
-            sb = QSpinBox()
+        def make_h_sb(lo, hi, val, step=1):
+            sb = NoWheelSpinBox()
             sb.setRange(lo, hi)
             sb.setSingleStep(step)
-            if sfx:
-                sb.setSuffix(sfx)
+            sb.setSuffix(" px")
+            sb.setMinimumWidth(0)
+            sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             sb.setValue(max(lo, min(hi, int(val))))
             return sb
 
-        hact, hblk, hfr, hsy = initial_data["hactive"], initial_data["hblank"], initial_data["hfront"], initial_data["hsync"]
-        vact, vblk, vfr, vsy = initial_data["vactive"], initial_data["vblank"], min(63, initial_data["vfront"]), min(63, initial_data["vsync"])
-        hbck, vbck = max(1, hblk - hfr - hsy), max(1, vblk - vfr - vsy)
+        def make_v_sb(lo, hi, val, step=0.5):
+            sb = NoWheelDoubleSpinBox(trim_trailing_zeros=True)
+            sb.setDecimals(1)
+            sb.setRange(float(lo), float(hi))
+            sb.setSingleStep(float(step))
+            sb.setSuffix(" lines")
+            sb.setMinimumWidth(0)
+            sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            sb.setValue(max(float(lo), min(float(hi), float(val))))
+            return sb
 
-        self.hactive_sb = make_sb(64, 4095, hact, 8)
-        self.vactive_sb = make_sb(64, 4095, vact, 2)
-        self.hfront_sb = make_sb(1, 1023, hfr, 8)
-        self.vfront_sb = make_sb(1, 63, vfr, 1)
-        self.hsync_sb = make_sb(1, 1023, hsy, 8)
-        self.vsync_sb = make_sb(1, 63, vsy, 1)
-        self.hback_sb = make_sb(1, 4095, hbck, 8)
-        self.vback_sb = make_sb(1, 4095, vbck, 1)
-        self.hblank_sb = make_sb(2, 4095, hblk, 8)
-        self.vblank_sb = make_sb(2, 4095, vblk, 2)
-        self.htotal_sb = make_sb(66, 8190, hact + hblk, 8)
-        self.vtotal_sb = make_sb(66, 8190, vact + vblk, 2)
+        hact = int(initial_data["hactive"])
+        hblk = int(initial_data["hblank"])
+        hfr = int(initial_data["hfront"])
+        hsy = int(initial_data["hsync"])
+        hbck = max(1, hblk - hfr - hsy)
 
-        for r_idx, (lbl, hw, vw) in enumerate([
-            ("Active:", self.hactive_sb, self.vactive_sb),
-            ("Front Porch:", self.hfront_sb, self.vfront_sb),
-            ("Sync Width:", self.hsync_sb, self.vsync_sb),
-            ("Back Porch:", self.hback_sb, self.vback_sb),
-            ("Blanking:", self.hblank_sb, self.vblank_sb),
-            ("Total:", self.htotal_sb, self.vtotal_sb),
-        ], start=1):
-            pgrid.addWidget(QLabel(lbl), r_idx, 0)
-            pgrid.addWidget(hw, r_idx, 1)
-            pgrid.addWidget(vw, r_idx, 2)
+        vact = int(initial_data["vactive"])
+        vfr_dec = float(initial_data.get("vfront_dec", min(63, initial_data["vfront"])))
+        vsy_dec = float(initial_data.get("vsync_dec", min(63, initial_data["vsync"])))
+        vblk_dec = float(initial_data.get("vblank_dec", initial_data["vblank"]))
+        vbck_dec = float(initial_data.get("vback_dec", max(0.5, vblk_dec - vfr_dec - vsy_dec)))
+        vtot_dec = float(initial_data.get("vtotal_dec", vact + vblk_dec))
+
+        self.hactive_sb = make_h_sb(64, 4095, hact, 8)
+        self.vactive_sb = NoWheelSpinBox()
+        self.vactive_sb.setRange(64, 4095)
+        self.vactive_sb.setSingleStep(2 if initial_data.get("interlaced") else 1)
+        self.vactive_sb.setSuffix(" lines")
+        self.vactive_sb.setMinimumWidth(0)
+        self.vactive_sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.vactive_sb.setValue(max(64, min(4095, vact)))
+
+        self.hfront_sb = make_h_sb(1, 1023, hfr, 8)
+        self.vfront_sb = make_v_sb(1.0, 63.5, vfr_dec, 0.5)
+        self.hsync_sb = make_h_sb(1, 1023, hsy, 8)
+        self.vsync_sb = make_v_sb(1.0, 63.5, vsy_dec, 0.5)
+        self.hback_sb = make_h_sb(1, 4095, hbck, 8)
+        self.vback_sb = make_v_sb(0.5, 4095.5, vbck_dec, 0.5)
+        self.hblank_sb = make_h_sb(2, 4095, hblk, 8)
+        self.vblank_sb = make_v_sb(2.0, 4095.5, vblk_dec, 0.5)
+        self.htotal_sb = make_h_sb(66, 8190, hact + hblk, 8)
+        self.vtotal_sb = make_v_sb(66.0, 8190.5, vtot_dec, 0.5)
+
+        self.rb_anchor_back = QRadioButton("Back Porch:")
+        self.rb_anchor_blank = QRadioButton("Blanking:")
+        self.rb_anchor_total = QRadioButton("Total:")
+        self.rb_anchor_back.setChecked(True)
+        self.hv_anchor_group = QButtonGroup(self)
+        self.hv_anchor_group.addButton(self.rb_anchor_back, 0)
+        self.hv_anchor_group.addButton(self.rb_anchor_blank, 1)
+        self.hv_anchor_group.addButton(self.rb_anchor_total, 2)
+        self.hv_anchor_group.idToggled.connect(self._on_hv_anchor_changed)
+
+        pgrid.addWidget(QLabel("Active:"), 1, 0)
+        pgrid.addWidget(self.hactive_sb, 1, 1)
+        pgrid.addWidget(self.vactive_sb, 1, 2)
+        pgrid.addWidget(QLabel("Front Porch:"), 2, 0)
+        pgrid.addWidget(self.hfront_sb, 2, 1)
+        pgrid.addWidget(self.vfront_sb, 2, 2)
+        pgrid.addWidget(QLabel("Sync Width:"), 3, 0)
+        pgrid.addWidget(self.hsync_sb, 3, 1)
+        pgrid.addWidget(self.vsync_sb, 3, 2)
+        pgrid.addWidget(self.rb_anchor_back, 4, 0)
+        pgrid.addWidget(self.hback_sb, 4, 1)
+        pgrid.addWidget(self.vback_sb, 4, 2)
+        pgrid.addWidget(self.rb_anchor_blank, 5, 0)
+        pgrid.addWidget(self.hblank_sb, 5, 1)
+        pgrid.addWidget(self.vblank_sb, 5, 2)
+        pgrid.addWidget(self.rb_anchor_total, 6, 0)
+        pgrid.addWidget(self.htotal_sb, 6, 1)
+        pgrid.addWidget(self.vtotal_sb, 6, 2)
 
         self.hsync_pos_cb = QCheckBox("+HSync")
+        self.hsync_pos_cb.setToolTip("Positive Horizontal Sync Polarity")
         self.hsync_pos_cb.setChecked(bool(initial_data.get("hsync_pos", False)))
         self.vsync_pos_cb = QCheckBox("+VSync")
+        self.vsync_pos_cb.setToolTip("Positive Vertical Sync Polarity")
         self.vsync_pos_cb.setChecked(bool(initial_data.get("vsync_pos", True)))
         pgrid.addWidget(QLabel("Polarity:"), 7, 0)
         pgrid.addWidget(self.hsync_pos_cb, 7, 1)
         pgrid.addWidget(self.vsync_pos_cb, 7, 2)
-
-        self.pclk_sb = QDoubleSpinBox()
-        self.pclk_sb.setRange(1.0, 2000.00)
-        self.pclk_sb.setDecimals(2)
-        self.pclk_sb.setSingleStep(0.25)
-        self.pclk_sb.setSuffix(" MHz")
-        self.pclk_sb.setValue(float(initial_data["pclk_mhz"]))
-        pgrid.addWidget(QLabel("Pixel Clock:"), 8, 0)
-        pgrid.addWidget(self.pclk_sb, 8, 1, 1, 2)
         layout.addWidget(param_group)
 
-        calc_group = QGroupBox("Summary")
+        freq_group = QGroupBox("Frequency && Pixel Clock (Decimal Precision)")
+        self.fgrid = QGridLayout(freq_group)
+        self.fgrid.setHorizontalSpacing(10)
+        self.fgrid.setVerticalSpacing(6)
+        self.fgrid.setColumnStretch(1, 1)
+
+        self.rb_rate_v = QRadioButton("Refresh Rate:")
+        self.rb_rate_h = QRadioButton("H-Scan Rate:")
+        self.rb_rate_pclk = QRadioButton("Pixel Clock:")
+        self.rb_rate_v.setChecked(True)
+        self.rate_anchor_group = QButtonGroup(self)
+        self.rate_anchor_group.addButton(self.rb_rate_v, 0)
+        self.rate_anchor_group.addButton(self.rb_rate_h, 1)
+        self.rate_anchor_group.addButton(self.rb_rate_pclk, 2)
+        self.rate_anchor_group.idToggled.connect(self._on_rate_anchor_changed)
+
+        self.actual_vrate_lbl = AutoWrapLabel("Actual: - Hz")
+        self.actual_hrate_lbl = AutoWrapLabel("Actual: - kHz")
+        self.actual_pclk_lbl = AutoWrapLabel("Actual: - MHz")
+
+        self.hscan_sb = NoWheelDoubleSpinBox(trim_trailing_zeros=False)
+        self.hscan_sb.setRange(5.0, 500.0)
+        self.hscan_sb.setDecimals(3)
+        self.hscan_sb.setSingleStep(0.1)
+        self.hscan_sb.setSuffix(" kHz")
+        self.hscan_sb.setMinimumWidth(0)
+        self.hscan_sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        htot_init = max(1, int(initial_data["hactive"]) + int(initial_data["hblank"]))
+        hscan_init = float(initial_data.get("hscan_khz", (float(initial_data["pclk_mhz"]) * 1000.0) / htot_init))
+        self.hscan_sb.setValue(max(5.0, min(500.0, hscan_init)))
+
+        self.pclk_sb = NoWheelDoubleSpinBox(trim_trailing_zeros=False)
+        self.pclk_sb.setRange(1.0, 2500.00)
+        self.pclk_sb.setDecimals(2)
+        self.pclk_sb.setSingleStep(0.01)
+        self.pclk_sb.setSuffix(" MHz")
+        self.pclk_sb.setMinimumWidth(0)
+        self.pclk_sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.pclk_sb.setValue(float(initial_data["pclk_mhz"]))
+        layout.addWidget(freq_group)
+
+        calc_group = QGroupBox("Live Timing Summary && ToastyX Interlace Breakdown")
         calc_layout = QVBoxLayout(calc_group)
-        self.stats_label = QLabel()
+        self.stats_label = AutoWrapLabel()
+        self.stats_label.setObjectName("summaryMono")
         self.stats_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.stats_label.setStyleSheet(
-            "QLabel { background-color: #161b22; color: #e6edf3; padding: 8px 10px; "
-            "border: 1px solid #30363d; border-radius: 5px; font-family: monospace; font-size: 12px; }"
-        )
         calc_layout.addWidget(self.stats_label)
         layout.addWidget(calc_group)
 
-        btn_layout = QHBoxLayout()
-        self.ok_btn = QPushButton("OK")
+        btn_bar = QFrame()
+        btn_bar.setObjectName("dialogBtnBar")
+        btn_layout = QHBoxLayout(btn_bar)
+        btn_layout.setContentsMargins(14, 10, 14, 10)
+        btn_layout.setSpacing(8)
+
+        self.ok_btn = QPushButton("✓ Save Resolution")
+        self.ok_btn.setObjectName("primaryBtn")
         self.ok_btn.clicked.connect(self.accept)
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addStretch()
         btn_layout.addWidget(cancel_btn)
         btn_layout.addWidget(self.ok_btn)
-        layout.addLayout(btn_layout)
+        outer_layout.addWidget(btn_bar, 0)
 
         self.preset_combo.currentIndexChanged.connect(self.on_mode_changed)
-        for w in (self.hactive_sb, self.vactive_sb, self.refresh_sb):
-            w.valueChanged.connect(self.on_active_or_target_changed)
-        self.interlaced_cb.toggled.connect(self.on_active_or_target_changed)
-        for sb in (self.hfront_sb, self.hsync_sb, self.hback_sb):
-            sb.valueChanged.connect(self.on_h_porch_changed)
+        self.hactive_sb.valueChanged.connect(self.on_active_or_target_changed)
+        self.vactive_sb.valueChanged.connect(self.on_active_or_target_changed)
+        self.refresh_sb.valueChanged.connect(self.on_refresh_changed)
+        self.interlaced_cb.toggled.connect(self.on_interlaced_toggled)
+        for sb in (self.hfront_sb, self.hsync_sb):
+            sb.valueChanged.connect(self.on_h_front_or_sync_changed)
+        self.hback_sb.valueChanged.connect(self.on_h_back_changed)
         self.hblank_sb.valueChanged.connect(self.on_h_blank_changed)
         self.htotal_sb.valueChanged.connect(self.on_h_total_changed)
-        for sb in (self.vfront_sb, self.vsync_sb, self.vback_sb):
-            sb.valueChanged.connect(self.on_v_porch_changed)
+        for sb in (self.vfront_sb, self.vsync_sb):
+            sb.valueChanged.connect(self.on_v_front_or_sync_changed)
+        self.vback_sb.valueChanged.connect(self.on_v_back_changed)
         self.vblank_sb.valueChanged.connect(self.on_v_blank_changed)
         self.vtotal_sb.valueChanged.connect(self.on_v_total_changed)
+        self.hscan_sb.valueChanged.connect(self.on_hscan_changed)
         self.pclk_sb.valueChanged.connect(self.on_pclk_changed)
         self.hsync_pos_cb.toggled.connect(self.update_live_stats)
         self.vsync_pos_cb.toggled.connect(self.update_live_stats)
 
         self.on_mode_changed()
+        self._reflow_dialog_layout()
 
-    def _sync_pclk_from_target_refresh(self):
-        htotal = self.hactive_sb.value() + self.hblank_sb.value()
-        vtotal = self.vactive_sb.value() + self.vblank_sb.value()
-        frame_rate = (self.refresh_sb.value() / 2.0) if self.interlaced_cb.isChecked() else self.refresh_sb.value()
-        pclk_mhz = round((frame_rate * htotal * vtotal) / 1_000_000.0, 2)
-        self.pclk_sb.setValue(max(1.0, min(2000.0, pclk_mhz)))
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reflow_dialog_layout()
+
+    def _reflow_dialog_layout(self):
+        if not hasattr(self, "top_grid") or not hasattr(self, "fgrid"):
+            return
+        compact = self.width() < 560
+        if compact == self._resp_compact:
+            return
+        self._resp_compact = compact
+
+        while self.top_grid.count():
+            self.top_grid.takeAt(0)
+        if compact:
+            self.top_grid.addWidget(self.lbl_timing, 0, 0)
+            self.top_grid.addWidget(self.preset_combo, 0, 1)
+            self.top_grid.addWidget(self.switch_manual_btn, 1, 0, 1, 2)
+            self.top_grid.addWidget(self.lbl_target_ref, 2, 0)
+            self.top_grid.addWidget(self.refresh_sb, 2, 1)
+            self.top_grid.addWidget(self.interlaced_cb, 3, 0, 1, 2)
+            self.top_grid.setColumnStretch(1, 1)
+            self.top_grid.setColumnStretch(2, 0)
+        else:
+            self.top_grid.addWidget(self.lbl_timing, 0, 0)
+            self.top_grid.addWidget(self.preset_combo, 0, 1)
+            self.top_grid.addWidget(self.switch_manual_btn, 0, 2)
+            self.top_grid.addWidget(self.lbl_target_ref, 1, 0)
+            self.top_grid.addWidget(self.refresh_sb, 1, 1)
+            self.top_grid.addWidget(self.interlaced_cb, 1, 2)
+            self.top_grid.setColumnStretch(1, 1)
+            self.top_grid.setColumnStretch(2, 0)
+
+        while self.fgrid.count():
+            self.fgrid.takeAt(0)
+        if compact:
+            self.fgrid.addWidget(self.rb_rate_v, 0, 0)
+            self.fgrid.addWidget(self.actual_vrate_lbl, 0, 1)
+            self.fgrid.addWidget(self.rb_rate_h, 1, 0)
+            self.fgrid.addWidget(self.hscan_sb, 1, 1)
+            self.fgrid.addWidget(self.actual_hrate_lbl, 2, 1)
+            self.fgrid.addWidget(self.rb_rate_pclk, 3, 0)
+            self.fgrid.addWidget(self.pclk_sb, 3, 1)
+            self.fgrid.addWidget(self.actual_pclk_lbl, 4, 1)
+            self.fgrid.setColumnStretch(1, 1)
+            self.fgrid.setColumnStretch(2, 0)
+        else:
+            self.fgrid.addWidget(self.rb_rate_v, 0, 0)
+            self.fgrid.addWidget(self.actual_vrate_lbl, 0, 1, 1, 2)
+            self.fgrid.addWidget(self.rb_rate_h, 1, 0)
+            self.fgrid.addWidget(self.hscan_sb, 1, 1)
+            self.fgrid.addWidget(self.actual_hrate_lbl, 1, 2)
+            self.fgrid.addWidget(self.rb_rate_pclk, 2, 0)
+            self.fgrid.addWidget(self.pclk_sb, 2, 1)
+            self.fgrid.addWidget(self.actual_pclk_lbl, 2, 2)
+            self.fgrid.setColumnStretch(1, 1)
+            self.fgrid.setColumnStretch(2, 0)
+
+    def _on_hv_anchor_changed(self, btn_id: int, checked: bool):
+        if checked:
+            self._last_hv_anchor = btn_id
+
+    def _on_rate_anchor_changed(self, btn_id: int, checked: bool):
+        if checked:
+            self._last_rate_anchor = btn_id
+
+    def switch_to_manual_preserving_values(self):
+        """Immediately switches from any preset (GTF, CVT, Auto, etc.) to Manual while keeping every calculated field."""
+        if self.preset_combo.currentText() == "Manual":
+            return
+        self._updating = True
+        self.preset_combo.setCurrentText("Manual")
+        self._updating = False
+        self._apply_manual_enable_state()
+        self.update_live_stats()
+
+    def _apply_manual_enable_state(self):
+        preset = self.preset_combo.currentText()
+        is_manual = (preset == "Manual")
+        is_native = ("Native" in preset)
+        self.switch_manual_btn.setEnabled(not is_manual)
+        self.switch_manual_btn.setText(
+            "✓ Manual Active (Unlocked)" if is_manual else "✎ Switch to Manual (Keep Values)"
+        )
+        for w in (
+            self.hfront_sb, self.hsync_sb, self.hback_sb, self.hblank_sb, self.htotal_sb,
+            self.vfront_sb, self.vsync_sb, self.vback_sb, self.vblank_sb, self.vtotal_sb,
+            self.hscan_sb, self.pclk_sb, self.hsync_pos_cb, self.vsync_pos_cb,
+            self.rb_anchor_back, self.rb_anchor_blank, self.rb_anchor_total,
+            self.rb_rate_v, self.rb_rate_h, self.rb_rate_pclk,
+        ):
+            w.setEnabled(is_manual)
+        self.refresh_sb.setEnabled(not is_native)
+
+    def _sync_rates_in_manual(self):
+        htotal = max(1, int(self.hactive_sb.value() + self.hblank_sb.value()))
+        vtotal = max(1.0, float(self.vactive_sb.value()) + float(self.vblank_sb.value()))
+        fields = 2.0 if self.interlaced_cb.isChecked() else 1.0
+
+        if self._last_rate_anchor == 0:
+            vrate_hz = float(self.refresh_sb.value())
+            frame_rate = vrate_hz / fields
+            pclk_mhz = round((frame_rate * htotal * vtotal) / 1_000_000.0, 2)
+            pclk_mhz = max(1.0, min(2500.0, pclk_mhz))
+            self.pclk_sb.setValue(pclk_mhz)
+            hscan_khz = (pclk_mhz * 1000.0) / htotal
+            self.hscan_sb.setValue(round(max(5.0, min(500.0, hscan_khz)), 3))
+        elif self._last_rate_anchor == 1:
+            hscan_khz = float(self.hscan_sb.value())
+            pclk_mhz = round((hscan_khz * htotal) / 1000.0, 2)
+            pclk_mhz = max(1.0, min(2500.0, pclk_mhz))
+            self.pclk_sb.setValue(pclk_mhz)
+            actual_hz = (pclk_mhz * 1_000_000.0 * fields) / (htotal * vtotal)
+            self.refresh_sb.setValue(round(max(10.0, min(600.0, actual_hz)), 3))
+        else:
+            pclk_mhz = float(self.pclk_sb.value())
+            actual_hz = (pclk_mhz * 1_000_000.0 * fields) / (htotal * vtotal)
+            hscan_khz = (pclk_mhz * 1000.0) / htotal
+            self.refresh_sb.setValue(round(max(10.0, min(600.0, actual_hz)), 3))
+            self.hscan_sb.setValue(round(max(5.0, min(500.0, hscan_khz)), 3))
 
     def on_mode_changed(self):
+        if self._updating:
+            return
         preset = self.preset_combo.currentText()
         is_manual = (preset == "Manual")
         is_native = ("Native" in preset)
@@ -603,15 +1598,38 @@ class DTDEditorDialog(QDialog):
             self._updating = False
         self._was_native = is_native
 
-        for sb in (self.hfront_sb, self.hsync_sb, self.hback_sb, self.hblank_sb, self.htotal_sb,
-                   self.vfront_sb, self.vsync_sb, self.vback_sb, self.vblank_sb, self.vtotal_sb,
-                   self.pclk_sb, self.hsync_pos_cb, self.vsync_pos_cb):
-            sb.setEnabled(is_manual)
-        self.refresh_sb.setEnabled(not is_native)
+        self._apply_manual_enable_state()
         if not is_manual:
             self.on_active_or_target_changed()
         else:
             self.update_live_stats()
+
+    def on_interlaced_toggled(self):
+        if self._updating:
+            return
+        il = self.interlaced_cb.isChecked()
+        self.vactive_sb.setSingleStep(2 if il else 1)
+        if self.preset_combo.currentText() != "Manual":
+            self.on_active_or_target_changed()
+            return
+        self._updating = True
+        if il and self.vactive_sb.value() % 2 != 0:
+            self.vactive_sb.setValue(self.vactive_sb.value() + 1)
+        self._updating = False
+        self.update_live_stats()
+
+    def on_refresh_changed(self):
+        if self._updating:
+            return
+        if self.preset_combo.currentText() == "Manual":
+            self._updating = True
+            self.rb_rate_v.setChecked(True)
+            self._last_rate_anchor = 0
+            self._sync_rates_in_manual()
+            self._updating = False
+            self.update_live_stats()
+        else:
+            self.on_active_or_target_changed()
 
     def on_active_or_target_changed(self):
         if self._updating:
@@ -623,46 +1641,82 @@ class DTDEditorDialog(QDialog):
         if self.interlaced_cb.isChecked() and self.vactive_sb.value() % 2 != 0:
             self.vactive_sb.setValue(self.vactive_sb.value() + 1)
         if preset != "Manual":
-            if "Native" in preset:
-                self.refresh_sb.setValue(60.0)
             res = calculate_timings(
                 preset,
-                self.hactive_sb.value(), self.vactive_sb.value(),
-                self.refresh_sb.value(), self.interlaced_cb.isChecked()
+                self.hactive_sb.value(),
+                self.vactive_sb.value(),
+                self.refresh_sb.value(),
+                self.interlaced_cb.isChecked(),
             )
-            hfr, hsy, hblk = res["hfront"], res["hsync"], res["hblank"]
-            vfr, vsy, vblk = min(63, res["vfront"]), min(63, res["vsync"]), res["vblank"]
+            if "Native" in preset:
+                self.refresh_sb.setValue(float(res["vrefresh"]))
+            hfr, hsy, hbck, hblk, htot = res["hfront"], res["hsync"], res["hback"], res["hblank"], res["htotal"]
+            vfr_d = min(63.5, float(res["vfront_dec"]))
+            vsy_d = min(63.5, float(res["vsync_dec"]))
+            vbck_d = float(res["vback_dec"])
+            vblk_d = float(res["vblank_dec"])
+            vtot_d = float(res["vtotal_dec"])
+
             self.hfront_sb.setValue(hfr)
             self.hsync_sb.setValue(hsy)
-            self.hback_sb.setValue(max(1, hblk - hfr - hsy))
+            self.hback_sb.setValue(max(1, hbck))
             self.hblank_sb.setValue(hblk)
-            self.htotal_sb.setValue(self.hactive_sb.value() + hblk)
-            self.vfront_sb.setValue(vfr)
-            self.vsync_sb.setValue(vsy)
-            self.vback_sb.setValue(max(1, vblk - vfr - vsy))
-            self.vblank_sb.setValue(vblk)
-            self.vtotal_sb.setValue(self.vactive_sb.value() + vblk)
-            self.pclk_sb.setValue(res["pclk_mhz"])
-            self.hsync_pos_cb.setChecked(res["hsync_pos"])
-            self.vsync_pos_cb.setChecked(res["vsync_pos"])
+            self.htotal_sb.setValue(htot)
+
+            self.vfront_sb.setValue(vfr_d)
+            self.vsync_sb.setValue(vsy_d)
+            self.vback_sb.setValue(max(0.5, vbck_d))
+            self.vblank_sb.setValue(vblk_d)
+            self.vtotal_sb.setValue(vtot_d)
+
+            self.pclk_sb.setValue(float(res["pclk_mhz"]))
+            self.hscan_sb.setValue(float(res["hscan_khz"]))
+            self.hsync_pos_cb.setChecked(bool(res["hsync_pos"]))
+            self.vsync_pos_cb.setChecked(bool(res["vsync_pos"]))
         else:
-            if self.interlaced_cb.isChecked() and self.vblank_sb.value() % 2 != 0:
-                self.vblank_sb.setValue(self.vblank_sb.value() + 1)
-                self.vback_sb.setValue(max(1, self.vblank_sb.value() - self.vfront_sb.value() - self.vsync_sb.value()))
-            self.htotal_sb.setValue(self.hactive_sb.value() + self.hblank_sb.value())
-            self.vtotal_sb.setValue(self.vactive_sb.value() + self.vblank_sb.value())
-            self._sync_pclk_from_target_refresh()
+            if self._last_hv_anchor == 2:
+                hblk = max(2, self.htotal_sb.value() - self.hactive_sb.value())
+                self.hblank_sb.setValue(hblk)
+                self.hback_sb.setValue(max(1, hblk - self.hfront_sb.value() - self.hsync_sb.value()))
+                vblk = max(2.0, self.vtotal_sb.value() - float(self.vactive_sb.value()))
+                self.vblank_sb.setValue(vblk)
+                self.vback_sb.setValue(max(0.5, vblk - self.vfront_sb.value() - self.vsync_sb.value()))
+            else:
+                self.htotal_sb.setValue(self.hactive_sb.value() + self.hblank_sb.value())
+                self.vtotal_sb.setValue(float(self.vactive_sb.value()) + self.vblank_sb.value())
+            self._sync_rates_in_manual()
         self._updating = False
         self.update_live_stats()
 
-    def on_h_porch_changed(self):
+    def on_h_front_or_sync_changed(self):
         if self._updating:
             return
         self._updating = True
-        hblk = self.hfront_sb.value() + self.hsync_sb.value() + self.hback_sb.value()
+        if self._last_hv_anchor == 0:
+            hblk = min(4095, self.hfront_sb.value() + self.hsync_sb.value() + self.hback_sb.value())
+            self.hblank_sb.setValue(hblk)
+            self.htotal_sb.setValue(self.hactive_sb.value() + hblk)
+        elif self._last_hv_anchor == 1:
+            self.hback_sb.setValue(max(1, self.hblank_sb.value() - self.hfront_sb.value() - self.hsync_sb.value()))
+            self.htotal_sb.setValue(self.hactive_sb.value() + self.hblank_sb.value())
+        else:
+            hblk = max(2, self.htotal_sb.value() - self.hactive_sb.value())
+            self.hblank_sb.setValue(hblk)
+            self.hback_sb.setValue(max(1, hblk - self.hfront_sb.value() - self.hsync_sb.value()))
+        self._sync_rates_in_manual()
+        self._updating = False
+        self.update_live_stats()
+
+    def on_h_back_changed(self):
+        if self._updating:
+            return
+        self._updating = True
+        self.rb_anchor_back.setChecked(True)
+        self._last_hv_anchor = 0
+        hblk = min(4095, self.hfront_sb.value() + self.hsync_sb.value() + self.hback_sb.value())
         self.hblank_sb.setValue(hblk)
         self.htotal_sb.setValue(self.hactive_sb.value() + hblk)
-        self._sync_pclk_from_target_refresh()
+        self._sync_rates_in_manual()
         self._updating = False
         self.update_live_stats()
 
@@ -670,12 +1724,14 @@ class DTDEditorDialog(QDialog):
         if self._updating:
             return
         self._updating = True
+        self.rb_anchor_blank.setChecked(True)
+        self._last_hv_anchor = 1
         min_blk = self.hfront_sb.value() + self.hsync_sb.value() + 1
         if self.hblank_sb.value() < min_blk:
             self.hblank_sb.setValue(min_blk)
         self.hback_sb.setValue(self.hblank_sb.value() - self.hfront_sb.value() - self.hsync_sb.value())
         self.htotal_sb.setValue(self.hactive_sb.value() + self.hblank_sb.value())
-        self._sync_pclk_from_target_refresh()
+        self._sync_rates_in_manual()
         self._updating = False
         self.update_live_stats()
 
@@ -683,27 +1739,47 @@ class DTDEditorDialog(QDialog):
         if self._updating:
             return
         self._updating = True
+        self.rb_anchor_total.setChecked(True)
+        self._last_hv_anchor = 2
         min_tot = self.hactive_sb.value() + self.hfront_sb.value() + self.hsync_sb.value() + 1
         if self.htotal_sb.value() < min_tot:
             self.htotal_sb.setValue(min_tot)
         hblk = self.htotal_sb.value() - self.hactive_sb.value()
         self.hblank_sb.setValue(hblk)
         self.hback_sb.setValue(hblk - self.hfront_sb.value() - self.hsync_sb.value())
-        self._sync_pclk_from_target_refresh()
+        self._sync_rates_in_manual()
         self._updating = False
         self.update_live_stats()
 
-    def on_v_porch_changed(self):
+    def on_v_front_or_sync_changed(self):
         if self._updating:
             return
         self._updating = True
+        if self._last_hv_anchor == 0:
+            vblk = self.vfront_sb.value() + self.vsync_sb.value() + self.vback_sb.value()
+            self.vblank_sb.setValue(vblk)
+            self.vtotal_sb.setValue(float(self.vactive_sb.value()) + vblk)
+        elif self._last_hv_anchor == 1:
+            self.vback_sb.setValue(max(0.5, self.vblank_sb.value() - self.vfront_sb.value() - self.vsync_sb.value()))
+            self.vtotal_sb.setValue(float(self.vactive_sb.value()) + self.vblank_sb.value())
+        else:
+            vblk = max(2.0, self.vtotal_sb.value() - float(self.vactive_sb.value()))
+            self.vblank_sb.setValue(vblk)
+            self.vback_sb.setValue(max(0.5, vblk - self.vfront_sb.value() - self.vsync_sb.value()))
+        self._sync_rates_in_manual()
+        self._updating = False
+        self.update_live_stats()
+
+    def on_v_back_changed(self):
+        if self._updating:
+            return
+        self._updating = True
+        self.rb_anchor_back.setChecked(True)
+        self._last_hv_anchor = 0
         vblk = self.vfront_sb.value() + self.vsync_sb.value() + self.vback_sb.value()
-        if self.interlaced_cb.isChecked() and vblk % 2 != 0:
-            vblk += 1
-            self.vback_sb.setValue(vblk - self.vfront_sb.value() - self.vsync_sb.value())
         self.vblank_sb.setValue(vblk)
-        self.vtotal_sb.setValue(self.vactive_sb.value() + vblk)
-        self._sync_pclk_from_target_refresh()
+        self.vtotal_sb.setValue(float(self.vactive_sb.value()) + vblk)
+        self._sync_rates_in_manual()
         self._updating = False
         self.update_live_stats()
 
@@ -711,14 +1787,14 @@ class DTDEditorDialog(QDialog):
         if self._updating:
             return
         self._updating = True
-        min_blk = self.vfront_sb.value() + self.vsync_sb.value() + 1
+        self.rb_anchor_blank.setChecked(True)
+        self._last_hv_anchor = 1
+        min_blk = self.vfront_sb.value() + self.vsync_sb.value() + 0.5
         if self.vblank_sb.value() < min_blk:
             self.vblank_sb.setValue(min_blk)
-        if self.interlaced_cb.isChecked() and self.vblank_sb.value() % 2 != 0:
-            self.vblank_sb.setValue(self.vblank_sb.value() + 1)
-        self.vback_sb.setValue(self.vblank_sb.value() - self.vfront_sb.value() - self.vsync_sb.value())
-        self.vtotal_sb.setValue(self.vactive_sb.value() + self.vblank_sb.value())
-        self._sync_pclk_from_target_refresh()
+        self.vback_sb.setValue(max(0.5, self.vblank_sb.value() - self.vfront_sb.value() - self.vsync_sb.value()))
+        self.vtotal_sb.setValue(float(self.vactive_sb.value()) + self.vblank_sb.value())
+        self._sync_rates_in_manual()
         self._updating = False
         self.update_live_stats()
 
@@ -726,16 +1802,25 @@ class DTDEditorDialog(QDialog):
         if self._updating:
             return
         self._updating = True
-        min_tot = self.vactive_sb.value() + self.vfront_sb.value() + self.vsync_sb.value() + 1
+        self.rb_anchor_total.setChecked(True)
+        self._last_hv_anchor = 2
+        min_tot = float(self.vactive_sb.value()) + self.vfront_sb.value() + self.vsync_sb.value() + 0.5
         if self.vtotal_sb.value() < min_tot:
             self.vtotal_sb.setValue(min_tot)
-        vblk = self.vtotal_sb.value() - self.vactive_sb.value()
-        if self.interlaced_cb.isChecked() and vblk % 2 != 0:
-            vblk += 1
-            self.vtotal_sb.setValue(self.vactive_sb.value() + vblk)
+        vblk = self.vtotal_sb.value() - float(self.vactive_sb.value())
         self.vblank_sb.setValue(vblk)
-        self.vback_sb.setValue(vblk - self.vfront_sb.value() - self.vsync_sb.value())
-        self._sync_pclk_from_target_refresh()
+        self.vback_sb.setValue(max(0.5, vblk - self.vfront_sb.value() - self.vsync_sb.value()))
+        self._sync_rates_in_manual()
+        self._updating = False
+        self.update_live_stats()
+
+    def on_hscan_changed(self):
+        if self._updating:
+            return
+        self._updating = True
+        self.rb_rate_h.setChecked(True)
+        self._last_rate_anchor = 1
+        self._sync_rates_in_manual()
         self._updating = False
         self.update_live_stats()
 
@@ -743,36 +1828,60 @@ class DTDEditorDialog(QDialog):
         if self._updating:
             return
         self._updating = True
-        htotal = self.hactive_sb.value() + self.hblank_sb.value()
-        vtotal = self.vactive_sb.value() + self.vblank_sb.value()
-        pclk = self.pclk_sb.value()
-        mult = 2.0 if self.interlaced_cb.isChecked() else 1.0
-        actual_hz = (pclk * 1_000_000.0 * mult) / (htotal * vtotal) if (htotal and vtotal) else 60.0
-        self.refresh_sb.setValue(round(actual_hz, 2))
+        self.rb_rate_pclk.setChecked(True)
+        self._last_rate_anchor = 2
+        self._sync_rates_in_manual()
         self._updating = False
         self.update_live_stats()
 
     def update_live_stats(self):
         if self._updating:
             return
-        hact, hfr, hsy, hblk = self.hactive_sb.value(), self.hfront_sb.value(), self.hsync_sb.value(), self.hblank_sb.value()
-        vact, vfr, vsy, vblk = self.vactive_sb.value(), self.vfront_sb.value(), self.vsync_sb.value(), self.vblank_sb.value()
-        hbck, vbck = hblk - hfr - hsy, vblk - vfr - vsy
-        htotal, vtotal = hact + hblk, vact + vblk
-        pclk = round(self.pclk_sb.value(), 2)
-        interlaced = self.interlaced_cb.isChecked()
+        hact = int(self.hactive_sb.value())
+        hfr = int(self.hfront_sb.value())
+        hsy = int(self.hsync_sb.value())
+        hblk = int(self.hblank_sb.value())
+        hbck = hblk - hfr - hsy
+        htotal = hact + hblk
 
-        frame_rate = (pclk * 1_000_000.0) / (htotal * vtotal) if (htotal and vtotal) else 0.0
-        actual_hz = frame_rate * 2.0 if interlaced else frame_rate
+        vact = int(self.vactive_sb.value())
+        vfr_d = float(self.vfront_sb.value())
+        vsy_d = float(self.vsync_sb.value())
+        vblk_d = float(self.vblank_sb.value())
+        vbck_d = vblk_d - vfr_d - vsy_d
+        vtotal_d = float(vact) + vblk_d
+
+        pclk = round(float(self.pclk_sb.value()), 2)
+        interlaced = self.interlaced_cb.isChecked()
+        fields = 2.0 if interlaced else 1.0
+
+        frame_rate = (pclk * 1_000_000.0) / (htotal * vtotal_d) if (htotal and vtotal_d) else 0.0
+        actual_hz = frame_rate * fields
         hscan_khz = (pclk * 1000.0) / htotal if htotal else 0.0
         line_us = (htotal / pclk) if pclk else 0.0
-        scan_str = f"{actual_hz:.2f} Hz (Interlaced, {frame_rate:.2f} fps)" if interlaced else f"{actual_hz:.2f} Hz (Progressive)"
+
+        self.actual_vrate_lbl.setText(f"Actual: {actual_hz:.3f} Hz")
+        self.actual_hrate_lbl.setText(f"Actual: {hscan_khz:.3f} kHz")
+        self.actual_pclk_lbl.setText(f"Actual: {pclk:.2f} MHz")
+
+        scan_str = f"{actual_hz:.3f} Hz (Interlaced, {frame_rate:.3f} fps)" if interlaced else f"{actual_hz:.3f} Hz (Progressive)"
         enc_str = "DisplayID (>655 MHz)" if pclk > 655.35 else "Standard EDID DTD"
+
+        def fmt_v(v: float) -> str:
+            return str(int(round(v))) if abs(v - round(v)) < 1e-6 else f"{v:.1f}"
+
+        if interlaced:
+            v_field_line = (
+                f"ToastyX Field:  VFront={vfr_d/2.0:.1f} | VSync={vsy_d/2.0:.1f} | "
+                f"VBack={vbck_d/2.0:.2f} | VBlank={vblk_d/2.0:.2f} | VTotal={vtotal_d/2.0:.2f}\n"
+            )
+        else:
+            v_field_line = ""
 
         warnings = []
         if htotal > 4095:
             warnings.append("HTotal > 4095!")
-        if hbck < 1 or vbck < 1:
+        if hbck < 1 or vbck_d < 0.5:
             warnings.append("Back Porch <= 0!")
         if hscan_khz > 140.0:
             warnings.append(">140 kHz H-Scan")
@@ -782,25 +1891,55 @@ class DTDEditorDialog(QDialog):
 
         self.stats_label.setText(
             f"Actual Refresh: {scan_str}\n"
-            f"H-Scan Rate:    {hscan_khz:.2f} kHz ({line_us:.2f} us line)\n"
-            f"Pixel Clock:    {pclk:.2f} MHz ({htotal} x {vtotal} total)\n"
+            f"H-Scan Rate:    {hscan_khz:.3f} kHz ({line_us:.2f} µs line)\n"
+            f"Pixel Clock:    {pclk:.2f} MHz ({htotal} × {fmt_v(vtotal_d)} total)\n"
+            f"{v_field_line}"
             f"Status:         {status_str}"
         )
 
     def get_result(self):
+        interlaced = self.interlaced_cb.isChecked()
+        vact = int(self.vactive_sb.value())
+        if interlaced and vact % 2 != 0:
+            vact += 1
+        vfr_dec = float(self.vfront_sb.value())
+        vsy_dec = float(self.vsync_sb.value())
+        vbck_dec = float(self.vback_sb.value())
+        vblk_dec = float(self.vblank_sb.value())
+        vtot_dec = float(vact) + vblk_dec
+
+        if interlaced:
+            vfr_int = max(2, int(round(vfr_dec / 2.0)) * 2)
+            vsy_int = max(2, int(round(vsy_dec / 2.0)) * 2)
+            vblk_int = max(vfr_int + vsy_int + 2, int(math.floor((vblk_dec + 0.5) / 2.0)) * 2)
+        else:
+            vfr_int = max(1, int(round(vfr_dec)))
+            vsy_int = max(1, int(round(vsy_dec)))
+            vblk_int = max(vfr_int + vsy_int + 1, int(round(vblk_dec)))
+
         return {
-            "type": "dtd", "pclk_mhz": round(self.pclk_sb.value(), 2),
-            "hactive": self.hactive_sb.value(), "hblank": self.hblank_sb.value(),
-            "hfront": self.hfront_sb.value(), "hsync": self.hsync_sb.value(),
-            "vactive": self.vactive_sb.value(), "vblank": self.vblank_sb.value(),
-            "vfront": self.vfront_sb.value(), "vsync": self.vsync_sb.value(),
-            "interlaced": self.interlaced_cb.isChecked(),
+            "type": "dtd",
+            "preset": self.preset_combo.currentText(),
+            "pclk_mhz": round(float(self.pclk_sb.value()), 2),
+            "hactive": int(self.hactive_sb.value()),
+            "hblank": int(self.hblank_sb.value()),
+            "hfront": int(self.hfront_sb.value()),
+            "hsync": int(self.hsync_sb.value()),
+            "vactive": vact,
+            "vblank": vblk_int,
+            "vfront": vfr_int,
+            "vsync": vsy_int,
+            "vfront_dec": vfr_dec,
+            "vsync_dec": vsy_dec,
+            "vback_dec": vbck_dec,
+            "vblank_dec": vblk_dec,
+            "vtotal_dec": vtot_dec,
+            "interlaced": interlaced,
             "hsync_pos": self.hsync_pos_cb.isChecked(),
-            "vsync_pos": self.vsync_pos_cb.isChecked()
+            "vsync_pos": self.vsync_pos_cb.isChecked(),
+            "vrefresh": round(float(self.refresh_sb.value()), 3),
+            "hscan_khz": round(float(self.hscan_sb.value()), 3),
         }
-
-
-PROFILES_DIR = os.path.expanduser("~/.config/linux-cru/profiles")
 
 
 def get_active_fw_map():
@@ -885,10 +2024,17 @@ def scan_drm_ports():
 class LinuxCRUWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Linux CRU")
-        self.resize(530, 500)
-        self.setMinimumSize(380, 380)
-        os.makedirs(PROFILES_DIR, exist_ok=True)
+        self.setWindowTitle("Linux CRU — Custom Resolution Utility")
+        self.resize(740, 660)
+        self.setMinimumSize(380, 420)
+        os.makedirs(DOCS_PROFILES_DIR, exist_ok=True)
+        os.makedirs(LEGACY_PROFILES_DIR, exist_ok=True)
+        self._sync_initial_documents_profiles()
+
+        self.ui_cfg = load_ui_config()
+        self.ui_scale = float(self.ui_cfg.get("ui_scale", 1.0) or 1.0)
+        self._resp_state = None
+        self.dtd_dec_overrides = {}
 
         self.ports = scan_drm_ports()
         self.current_port_info = self.ports[0]
@@ -898,131 +2044,432 @@ class LinuxCRUWindow(QMainWindow):
         self.std_slots = decode_std_timings(self.edid_bytes)
         self._switching_port = False
 
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setCentralWidget(scroll)
+
         central = QWidget()
-        self.setCentralWidget(central)
+        central.setObjectName("scrollContent")
+        scroll.setWidget(central)
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(12)
+
+        # Header Row (Title + Zoom button only — no subtitle description)
+        hdr_row = QHBoxLayout()
+        self.title_lbl = AutoWrapLabel("Linux CRU — Custom Resolution Utility")
+        self.title_lbl.setObjectName("mainTitle")
+        hdr_row.addWidget(self.title_lbl, 1, Qt.AlignmentFlag.AlignVCenter)
+
+        self.zoom_btn = QPushButton(f"🔍 {int(round(self.ui_scale * 100))}%")
+        self.zoom_btn.setToolTip("Hold Ctrl + Scroll Wheel (or Ctrl + / -) to zoom UI. Click to reset to 100%.")
+        self.zoom_btn.clicked.connect(lambda: self.apply_ui_scale(1.0))
+        hdr_row.addWidget(self.zoom_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(hdr_row)
+
+        # Status Banner Card
+        self.banner_card = QFrame()
+        self.banner_card.setObjectName("bannerCard")
+        banner_layout = QHBoxLayout(self.banner_card)
+        banner_layout.setContentsMargins(14, 10, 14, 10)
+        banner_layout.setSpacing(10)
+        self.path_label = AutoWrapLabel("Source: New Blank Profile")
+        self.path_label.setObjectName("bannerLabel")
+        self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        banner_layout.addWidget(self.path_label, 1)
+
+        self.port_badge = QLabel("Port Ready")
+        self.port_badge.setObjectName("badgeOk")
+        self.port_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        banner_layout.addWidget(self.port_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.banner_card)
 
         # Top Port & Profile Selector
-        top_group = QGroupBox("Video Port && Profile")
+        top_group = QGroupBox("1. Video Port && EDID Profile")
         top_vbox = QVBoxLayout(top_group)
+        top_vbox.setSpacing(10)
 
         sel_grid = QGridLayout()
-        self.port_combo = QComboBox()
-        for info in self.ports:
-            tag = " [Custom EDID Active]" if info["active_override"] else ""
-            self.port_combo.addItem(f"{info['port']} ({info['card']}, {info['status']}){tag}")
+        sel_grid.setHorizontalSpacing(10)
+        sel_grid.setVerticalSpacing(8)
+        self.port_combo = NoWheelComboBox()
+        self._populate_port_combo()
         self.port_combo.currentIndexChanged.connect(self.on_port_changed)
 
-        self.profile_combo = QComboBox()
+        self.profile_combo = NoWheelComboBox()
         self.profile_combo.activated.connect(self.on_profile_selected)
 
-        sel_grid.addWidget(QLabel("Port:"), 0, 0)
+        self.lbl_port = QLabel("<b>Target Port:</b>")
+        self.lbl_prof = QLabel("<b>EDID Profile:</b>")
+        sel_grid.addWidget(self.lbl_port, 0, 0)
         sel_grid.addWidget(self.port_combo, 0, 1)
-        sel_grid.addWidget(QLabel("Profile:"), 1, 0)
+        sel_grid.addWidget(self.lbl_prof, 1, 0)
         sel_grid.addWidget(self.profile_combo, 1, 1)
         sel_grid.setColumnStretch(1, 1)
         top_vbox.addLayout(sel_grid)
 
-        self.path_label = QLabel("Source: New Blank Profile")
-        self.path_label.setMinimumWidth(100)
-        font = QFont()
-        font.setBold(True)
-        self.path_label.setFont(font)
-        top_vbox.addWidget(self.path_label)
-
-        top_bar = QHBoxLayout()
-        drm_btn = QPushButton("Pull Port EDID")
-        drm_btn.setToolTip("Reads the live EDID from the currently selected video port.")
-        drm_btn.clicked.connect(self.read_drm_edid)
-        save_prof_btn = QPushButton("Save Profile...")
-        save_prof_btn.setToolTip("Saves current timings as a named profile in ~/.config/linux-cru/profiles/")
-        save_prof_btn.clicked.connect(self.save_named_profile)
-        open_btn = QPushButton("Import...")
-        open_btn.clicked.connect(self.open_bin)
-        new_btn = QPushButton("New")
-        new_btn.clicked.connect(self.new_blank_edid)
-        top_bar.addWidget(drm_btn)
-        top_bar.addWidget(save_prof_btn)
-        top_bar.addWidget(open_btn)
-        top_bar.addWidget(new_btn)
-        top_bar.addStretch()
-        top_vbox.addLayout(top_bar)
+        self.top_btn_grid = QGridLayout()
+        self.top_btn_grid.setSpacing(8)
+        self.drm_btn = QPushButton("⬇ Pull Port EDID")
+        self.drm_btn.setToolTip("Reads the live EDID from the currently selected video port.")
+        self.drm_btn.clicked.connect(self.read_drm_edid)
+        self.save_prof_btn = QPushButton("💾 Save Profile...")
+        self.save_prof_btn.setToolTip("Saves current timings as a named .bin profile in ~/Documents/linux-cru/")
+        self.save_prof_btn.clicked.connect(self.save_named_profile)
+        self.open_btn = QPushButton("📂 Import .bin...")
+        self.open_btn.clicked.connect(self.open_bin)
+        self.new_btn = QPushButton("✨ New Blank")
+        self.new_btn.clicked.connect(self.new_blank_edid)
+        self.top_buttons = [self.drm_btn, self.save_prof_btn, self.open_btn, self.new_btn]
+        for i, b in enumerate(self.top_buttons):
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            self.top_btn_grid.addWidget(b, 0, i)
+        top_vbox.addLayout(self.top_btn_grid)
         layout.addWidget(top_group)
 
         # Detailed Resolutions Group (4 Slots)
-        dtd_group = QGroupBox("Detailed Resolutions (4 Slots)")
+        dtd_group = QGroupBox("2. Detailed Resolutions (4 Slots — Double-Click to Edit)")
         dtd_layout = QVBoxLayout(dtd_group)
-        self.table = QTableWidget(4, 5)
+        dtd_layout.setSpacing(8)
+        self.table = QTableWidget(4, 6)
         self.table.setHorizontalHeaderLabels([
-            "Slot", "Resolution", "Refresh Rate", "H-Scan", "Pixel Clock"
+            "Slot", "Resolution", "Refresh Rate", "H-Scan", "Pixel Clock", "Timing / Sync"
         ])
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        for col in range(1, 5):
+        for col in range(1, 6):
             hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setMinimumHeight(148)
         self.table.doubleClicked.connect(self.edit_selected_dtd)
         dtd_layout.addWidget(self.table)
 
-        dtd_btns = QHBoxLayout()
-        edit_dtd_btn = QPushButton("Add / Edit...")
-        edit_dtd_btn.clicked.connect(self.edit_selected_dtd)
-        del_dtd_btn = QPushButton("Clear Slot")
-        del_dtd_btn.clicked.connect(self.clear_selected_dtd)
-        del_all_dtd_btn = QPushButton("Clear All")
-        del_all_dtd_btn.clicked.connect(self.clear_all_dtds)
-        dtd_btns.addWidget(edit_dtd_btn)
-        dtd_btns.addWidget(del_dtd_btn)
-        dtd_btns.addWidget(del_all_dtd_btn)
-        dtd_btns.addStretch()
-        dtd_layout.addLayout(dtd_btns)
+        self.dtd_btn_grid = QGridLayout()
+        self.dtd_btn_grid.setSpacing(8)
+        self.edit_dtd_btn = QPushButton("✎ Add / Edit Detailed Resolution...")
+        self.edit_dtd_btn.setObjectName("primaryBtn")
+        self.edit_dtd_btn.clicked.connect(self.edit_selected_dtd)
+        self.del_dtd_btn = QPushButton("Clear Slot")
+        self.del_dtd_btn.clicked.connect(self.clear_selected_dtd)
+        self.del_all_dtd_btn = QPushButton("Clear All")
+        self.del_all_dtd_btn.clicked.connect(self.clear_all_dtds)
+        self.dtd_buttons = [self.edit_dtd_btn, self.del_dtd_btn, self.del_all_dtd_btn]
+        for i, b in enumerate(self.dtd_buttons):
+            self.dtd_btn_grid.addWidget(b, 0, i)
+        dtd_layout.addLayout(self.dtd_btn_grid)
         layout.addWidget(dtd_group)
 
         # Standard Resolutions Group (8 Slots)
-        std_group = QGroupBox("Standard Resolutions (8 Slots)")
-        std_layout = QHBoxLayout(std_group)
+        std_group = QGroupBox("3. Standard Resolutions (8 Slots)")
+        self.std_box_layout = QVBoxLayout(std_group)
+        self.std_box_layout.setSpacing(8)
         self.std_list = QListWidget()
+        self.std_list.setMinimumHeight(96)
         self.std_list.doubleClicked.connect(self.edit_std_res)
-        std_layout.addWidget(self.std_list, 1)
+        self.std_box_layout.addWidget(self.std_list)
 
-        std_btns = QVBoxLayout()
-        add_std_btn = QPushButton("Add...")
-        add_std_btn.clicked.connect(self.add_std_res)
-        edit_std_btn = QPushButton("Edit...")
-        edit_std_btn.clicked.connect(self.edit_std_res)
-        del_std_btn = QPushButton("Delete")
-        del_std_btn.clicked.connect(self.del_std_res)
-        del_all_std_btn = QPushButton("Delete All")
-        del_all_std_btn.clicked.connect(self.del_all_std_res)
-        std_btns.addWidget(add_std_btn)
-        std_btns.addWidget(edit_std_btn)
-        std_btns.addWidget(del_std_btn)
-        std_btns.addWidget(del_all_std_btn)
-        std_btns.addStretch()
-        std_layout.addLayout(std_btns)
+        self.std_btn_grid = QGridLayout()
+        self.std_btn_grid.setSpacing(8)
+        self.add_std_btn = QPushButton("➕ Add...")
+        self.add_std_btn.clicked.connect(self.add_std_res)
+        self.edit_std_btn = QPushButton("✎ Edit...")
+        self.edit_std_btn.clicked.connect(self.edit_std_res)
+        self.del_std_btn = QPushButton("Delete")
+        self.del_std_btn.clicked.connect(self.del_std_res)
+        self.del_all_std_btn = QPushButton("Delete All")
+        self.del_all_std_btn.clicked.connect(self.del_all_std_res)
+        self.std_buttons = [self.add_std_btn, self.edit_std_btn, self.del_std_btn, self.del_all_std_btn]
+        for i, b in enumerate(self.std_buttons):
+            self.std_btn_grid.addWidget(b, 0, i)
+        self.std_box_layout.addLayout(self.std_btn_grid)
         layout.addWidget(std_group)
 
-        # Bottom Actions
-        bot_bar = QHBoxLayout()
-        export_btn = QPushButton("Export .bin...")
-        export_btn.clicked.connect(self.save_bin_as)
-        live_btn = QPushButton("Apply Live (No Reboot)")
-        live_btn.setToolTip("Loads the EDID into the kernel DRM driver and triggers a hotplug refresh without rebooting.")
-        live_btn.clicked.connect(self.apply_live_no_reboot)
-        install_btn = QPushButton("Install && Rebuild Initramfs")
-        install_btn.setToolTip("Saves to /usr/lib/firmware/edid/, applies live, and rebuilds initramfs for boot persistence.")
-        install_btn.clicked.connect(self.install_to_firmware)
-        bot_bar.addWidget(export_btn)
-        bot_bar.addStretch()
-        bot_bar.addWidget(live_btn)
-        bot_bar.addWidget(install_btn)
-        layout.addLayout(bot_bar)
+        # Bottom Actions Card
+        bot_card = QFrame()
+        bot_card.setObjectName("actionCard")
+        self.bot_btn_grid = QGridLayout(bot_card)
+        self.bot_btn_grid.setContentsMargins(12, 10, 12, 10)
+        self.bot_btn_grid.setSpacing(8)
+        self.export_btn = QPushButton("📤 Export .bin...")
+        self.export_btn.clicked.connect(self.save_bin_as)
+        self.live_btn = QPushButton("⚡ Apply Live (No Reboot)")
+        self.live_btn.setObjectName("accentBtn")
+        self.live_btn.setToolTip("Loads the EDID into the kernel DRM driver and triggers a hotplug refresh without rebooting.")
+        self.live_btn.clicked.connect(self.apply_live_no_reboot)
+        self.install_btn = QPushButton("🚀 Install && Rebuild Initramfs")
+        self.install_btn.setObjectName("primaryBtn")
+        self.install_btn.setToolTip("Saves to /usr/lib/firmware/edid/, applies live, and rebuilds initramfs for boot persistence.")
+        self.install_btn.clicked.connect(self.install_to_firmware)
+        self.bot_buttons = [self.export_btn, self.live_btn, self.install_btn]
+        for i, b in enumerate(self.bot_buttons):
+            self.bot_btn_grid.addWidget(b, 0, i)
+        layout.addWidget(bot_card)
 
+        self._setup_zoom_shortcuts()
+        self.apply_ui_scale(self.ui_scale, save=False)
         self.table.selectRow(0)
-        self.on_port_changed(0)
+        self.on_port_changed(self.port_combo.currentIndex())
+        self._reflow_responsive()
+
+    def _sync_initial_documents_profiles(self):
+        """Ensures ~/Documents/linux-cru exists and migrates/copies any existing user .bin profiles so they are selectable."""
+        try:
+            os.makedirs(DOCS_PROFILES_DIR, exist_ok=True)
+            for src_dir in (LEGACY_PROFILES_DIR, os.path.expanduser("~/Documents")):
+                if not os.path.isdir(src_dir):
+                    continue
+                for fn in sorted(os.listdir(src_dir)):
+                    if not fn.lower().endswith(".bin"):
+                        continue
+                    src_p = os.path.join(src_dir, fn)
+                    dst_p = os.path.join(DOCS_PROFILES_DIR, fn)
+                    if os.path.isfile(src_p) and not os.path.exists(dst_p):
+                        try:
+                            with open(src_p, "rb") as fsrc:
+                                data = fsrc.read()
+                            if len(data) >= 128 and data[:8] == b"\x00\xff\xff\xff\xff\xff\xff\x00":
+                                with open(dst_p, "wb") as fdst:
+                                    fdst.write(data)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+    def _populate_port_combo(self):
+        """Populates Target Port dropdown with connected ports in an active segment and disconnected ports greyed out."""
+        self.port_combo.blockSignals(True)
+        self.port_combo.clear()
+
+        hdr_font = QFont()
+        hdr_font.setBold(True)
+
+        connected = [info for info in self.ports if info.get("status") == "connected"]
+        disconnected = [info for info in self.ports if info.get("status") != "connected"]
+        seen_ports = set()
+        first_selectable_idx = -1
+
+        if connected:
+            self.port_combo.addItem("── Connected Video Ports ──", None)
+            h_item = self.port_combo.model().item(self.port_combo.count() - 1)
+            if h_item is not None:
+                h_item.setEnabled(False)
+                h_item.setFont(hdr_font)
+                h_item.setForeground(QBrush(QColor("#56d364")))
+            for info in connected:
+                seen_ports.add(info["port"])
+                tag = f" [✓ EDID: {info['rel_fw']}]" if info.get("active_override") else ""
+                label = f"● {info['port']} ({info['card']}, connected){tag}"
+                self.port_combo.addItem(label, info)
+                if first_selectable_idx < 0:
+                    first_selectable_idx = self.port_combo.count() - 1
+
+        if disconnected:
+            self.port_combo.addItem("── Disconnected Video Ports ──", None)
+            h_item = self.port_combo.model().item(self.port_combo.count() - 1)
+            if h_item is not None:
+                h_item.setEnabled(False)
+                h_item.setFont(hdr_font)
+                h_item.setForeground(QBrush(QColor("#8b949e")))
+            for info in disconnected:
+                seen_ports.add(info["port"])
+                tag = f" [EDID: {info['rel_fw']}]" if info.get("active_override") else ""
+                label = f"○ {info['port']} ({info['card']}, {info['status']}){tag}"
+                self.port_combo.addItem(label, info)
+                d_item = self.port_combo.model().item(self.port_combo.count() - 1)
+                if d_item is not None:
+                    if connected:
+                        d_item.setEnabled(False)
+                        d_item.setForeground(QBrush(QColor("#6e7681")))
+                    elif first_selectable_idx < 0:
+                        first_selectable_idx = self.port_combo.count() - 1
+
+        missing_fallbacks = [
+            fb for fb in ("DP-1", "DP-2", "DP-3", "HDMI-A-1", "HDMI-A-2", "VGA-1", "DVI-I-1")
+            if fb not in seen_ports
+        ]
+        if missing_fallbacks:
+            self.port_combo.addItem("── Pre-Configure / Unlisted Ports ──", None)
+            h_item = self.port_combo.model().item(self.port_combo.count() - 1)
+            if h_item is not None:
+                h_item.setEnabled(False)
+                h_item.setFont(hdr_font)
+                h_item.setForeground(QBrush(QColor("#8b949e")))
+            for fb in missing_fallbacks:
+                rel_fw = "edid/crufile.bin" if fb == "VGA-1" else f"edid/cru-{fb.lower()}.bin"
+                fb_info = {
+                    "card": "none",
+                    "port": fb,
+                    "status": "unlisted",
+                    "sysfs_dir": "",
+                    "edid_path": "",
+                    "has_edid": False,
+                    "rel_fw": rel_fw,
+                    "fw_path": f"/usr/lib/firmware/{rel_fw}",
+                    "active_override": False,
+                }
+                self.port_combo.addItem(f"○ {fb} (Pre-configure / Not currently detected)", fb_info)
+                f_item = self.port_combo.model().item(self.port_combo.count() - 1)
+                if f_item is not None:
+                    f_item.setEnabled(False)
+                    f_item.setForeground(QBrush(QColor("#6e7681")))
+
+        if first_selectable_idx >= 0:
+            self.port_combo.setCurrentIndex(first_selectable_idx)
+        self.port_combo.blockSignals(False)
+
+    def _setup_zoom_shortcuts(self):
+        for seq in ("Ctrl++", "Ctrl+="):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.activated.connect(lambda: self.apply_ui_scale(self.ui_scale + 0.05))
+        sc_minus = QShortcut(QKeySequence("Ctrl+-"), self)
+        sc_minus.activated.connect(lambda: self.apply_ui_scale(self.ui_scale - 0.05))
+        sc_zero = QShortcut(QKeySequence("Ctrl+0"), self)
+        sc_zero.activated.connect(lambda: self.apply_ui_scale(1.0))
+        self.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Wheel:
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                delta = event.angleDelta().y()
+                if delta > 0:
+                    self.apply_ui_scale(self.ui_scale + 0.05)
+                elif delta < 0:
+                    self.apply_ui_scale(self.ui_scale - 0.05)
+                return True
+        return super().eventFilter(obj, event)
+
+    def apply_ui_scale(self, scale: float, save: bool = True):
+        self.ui_scale = max(0.75, min(1.65, round(scale, 2)))
+        if save:
+            self.ui_cfg["ui_scale"] = self.ui_scale
+            save_ui_config(self.ui_cfg)
+        if hasattr(self, "zoom_btn"):
+            self.zoom_btn.setText(f"🔍 {int(round(self.ui_scale * 100))}%")
+
+        base_pt = round(10.0 * self.ui_scale, 1)
+        small_pt = round(9.0 * self.ui_scale, 1)
+        title_pt = round(14.5 * self.ui_scale, 1)
+        grp_pt = round(10.8 * self.ui_scale, 1)
+        row_h = max(26, int(round(31 * self.ui_scale)))
+
+        for r in range(4):
+            self.table.setRowHeight(r, row_h)
+        self.table.setMinimumHeight(max(136, int(round(row_h * 4 + 34 * self.ui_scale))))
+
+        QApplication.instance().setStyleSheet(f"""
+            QMainWindow, QDialog, QWidget#scrollContent, QWidget#dialogContent {{
+                background-color: #16181d; color: #e6edf3; font-size: {base_pt}pt;
+            }}
+            QScrollArea {{ border: none; background-color: #16181d; }}
+            QLabel, QRadioButton, QCheckBox {{ color: #e6edf3; font-size: {base_pt}pt; }}
+            QLabel#mainTitle {{ font-size: {title_pt}pt; font-weight: bold; color: #ffffff; }}
+            QLabel#mainSubtitle {{ font-size: {small_pt}pt; color: #9da7b3; }}
+            QLabel#bannerLabel {{ font-size: {base_pt}pt; font-weight: 600; color: #f0f6fc; }}
+            QLabel#summaryMono {{
+                background-color: #12161c; color: #e6edf3; padding: 8px 10px;
+                border: 1px solid #30363d; border-radius: 6px;
+                font-family: monospace; font-size: {small_pt}pt;
+            }}
+            QFrame#bannerCard {{
+                background-color: #192332; border: 1px solid #315a8a; border-radius: 10px;
+            }}
+            QFrame#actionCard, QFrame#dialogBtnBar {{
+                background-color: #1c2129; border: 1px solid #353e4d; border-radius: 10px;
+            }}
+            QLabel#badgeOk {{
+                background-color: #153726; color: #56d364; border: 1px solid #2ea043;
+                border-radius: 5px; padding: 3px 9px; font-size: {small_pt}pt; font-weight: bold;
+            }}
+            QLabel#badgeWarn {{
+                background-color: #3a2d13; color: #e3b341; border: 1px solid #9e6a03;
+                border-radius: 5px; padding: 3px 9px; font-size: {small_pt}pt; font-weight: bold;
+            }}
+            QGroupBox {{
+                background-color: #1c2028; border: 1px solid #343c4a; border-radius: 10px;
+                margin-top: 12px; padding: 12px 10px 10px 10px;
+                font-size: {grp_pt}pt; font-weight: bold; color: #f0f6fc;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin; subcontrol-position: top left;
+                left: 12px; padding: 0 6px; color: #79c0ff;
+            }}
+            QComboBox, QSpinBox, QDoubleSpinBox {{
+                background-color: #252b35; color: #f0f6fc; border: 1px solid #414a58;
+                border-radius: 6px; padding: 5px 8px; min-height: 22px; font-size: {base_pt}pt;
+            }}
+            QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {{
+                background-color: #1a1e25; color: #768390; border: 1px solid #2d333b;
+            }}
+            QTableWidget, QListWidget {{
+                background-color: #14181f; color: #e6edf3; border: 1px solid #343c4a;
+                border-radius: 6px; gridline-color: #282f3a; font-size: {base_pt}pt;
+            }}
+            QHeaderView::section {{
+                background-color: #222731; color: #c9d1d9; border: none;
+                border-bottom: 1px solid #384150; border-right: 1px solid #2d3440;
+                padding: 5px 6px; font-size: {small_pt}pt; font-weight: bold;
+            }}
+            QPushButton {{
+                background-color: #2b323d; color: #f0f6fc; border: 1px solid #485263;
+                border-radius: 6px; padding: 6px 12px; font-size: {base_pt}pt; font-weight: 600;
+            }}
+            QPushButton:hover:enabled {{ background-color: #363f4e; border-color: #637085; }}
+            QPushButton:disabled {{ background-color: #1c2027; color: #6e7681; border: 1px solid #2d333d; }}
+            QPushButton#primaryBtn {{
+                background-color: #1f6feb; color: #ffffff; border: 1px solid #388bfd;
+            }}
+            QPushButton#primaryBtn:hover:enabled {{ background-color: #2a7aef; }}
+            QPushButton#accentBtn {{
+                background-color: #1b4b36; color: #7ee787; border: 1px solid #2ea043;
+            }}
+            QPushButton#accentBtn:hover:enabled {{ background-color: #235d43; }}
+        """)
+        self._reflow_responsive()
+
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reflow_responsive()
+
+    def _reflow_grid_buttons(self, grid: QGridLayout, buttons: list, cols: int):
+        while grid.count():
+            grid.takeAt(0)
+        for c in range(max(4, cols)):
+            grid.setColumnStretch(c, 0)
+        for idx, btn in enumerate(buttons):
+            r, c = divmod(idx, cols)
+            grid.addWidget(btn, r, c)
+        for c in range(cols):
+            grid.setColumnStretch(c, 1)
+
+    def _reflow_responsive(self):
+        if not hasattr(self, "top_btn_grid"):
+            return
+        eff_w = self.width() / max(0.75, self.ui_scale)
+        compact = eff_w < 600
+        narrow = eff_w < 460
+        state = (compact, narrow)
+        if state == self._resp_state:
+            return
+        self._resp_state = state
+
+        top_cols = 1 if narrow else (2 if compact else 4)
+        dtd_cols = 1 if narrow else (2 if compact else 3)
+        std_cols = 1 if narrow else (2 if compact else 4)
+        bot_cols = 1 if compact else 3
+
+        self._reflow_grid_buttons(self.top_btn_grid, self.top_buttons, top_cols)
+        self._reflow_grid_buttons(self.dtd_btn_grid, self.dtd_buttons, dtd_cols)
+        self._reflow_grid_buttons(self.std_btn_grid, self.std_buttons, std_cols)
+        self._reflow_grid_buttons(self.bot_btn_grid, self.bot_buttons, bot_cols)
+
+        align = Qt.AlignmentFlag.AlignCenter if narrow else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.title_lbl.setAlignment(align)
+        self.path_label.setAlignment(align)
 
     def _collect_high_clock_dtds(self):
         high = []
@@ -1034,6 +2481,7 @@ class LinuxCRUWindow(QMainWindow):
         return high
 
     def auto_fix_cru_on_load(self):
+        self.dtd_dec_overrides = {}
         for off in DTD_OFFSETS:
             block = self.edid_bytes[off:off+18]
             d = decode_dtd(block, self.edid_bytes)
@@ -1047,24 +2495,47 @@ class LinuxCRUWindow(QMainWindow):
 
     def refresh_ui(self):
         muted = QColor("#8b949e")
+        info = self.current_port_info
+        if hasattr(self, "port_badge"):
+            is_conn = info.get("status") == "connected"
+            has_ov = bool(info.get("active_override"))
+            badge_txt = f"✓ {info['port']} (EDID Active)" if has_ov else f"● {info['port']} ({info.get('status', 'ready')})"
+            self.port_badge.setText(badge_txt)
+            self.port_badge.setObjectName("badgeOk" if (is_conn or has_ov) else "badgeWarn")
+            self.port_badge.style().unpolish(self.port_badge)
+            self.port_badge.style().polish(self.port_badge)
+
         for idx, off in enumerate(DTD_OFFSETS):
             d = decode_dtd(self.edid_bytes[off:off+18], self.edid_bytes)
+            ov = self.dtd_dec_overrides.get(idx)
+            if d["type"] == "dtd" and ov and ov.get("hactive") == d["hactive"] and ov.get("vactive") == d["vactive"]:
+                d.update(ov)
             slot_lbl = f"Slot {idx+1}"
             if d["type"] == "dtd":
                 scan_ch = "i" if d["interlaced"] else "p"
-                res_str = f"{d['hactive']} x {d['vactive']}{scan_ch}"
-                rate_str = f"{d['vrefresh']:.2f} Hz"
-                hscan_str = f"{d['hscan_khz']:.2f} kHz"
+                res_str = f"{d['hactive']} × {d['vactive']}{scan_ch}"
+                rate_str = f"{d['vrefresh']:.3f} Hz"
+                hscan_str = f"{d['hscan_khz']:.3f} kHz"
                 clk_str = f"{d['pclk_mhz']:.2f} MHz"
+                pol = f"{'+' if d.get('hsync_pos') else '-'}H/{'+' if d.get('vsync_pos') else '-'}V"
+                preset = detect_timing_preset(d)
+                sync_str = f"{preset} [{pol}]"
                 is_empty = False
+            elif d["type"] == "range":
+                res_str = d.get("summary", "Monitor Range Limits")
+                rate_str = hscan_str = clk_str = sync_str = "Range Limits"
+                is_empty = True
             else:
-                res_str, rate_str, hscan_str, clk_str = "Empty", "-", "-", "-"
+                res_str, rate_str, hscan_str, clk_str, sync_str = "(Empty)", "-", "-", "-", "-"
                 is_empty = True
 
-            for c_idx, text in enumerate([slot_lbl, res_str, rate_str, hscan_str, clk_str]):
+            for c_idx, text in enumerate([slot_lbl, res_str, rate_str, hscan_str, clk_str, sync_str]):
                 item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if is_empty and c_idx > 0:
                     item.setForeground(muted)
+                elif d.get("type") == "dtd" and d.get("interlaced") and c_idx > 0:
+                    item.setForeground(QColor("#56d364"))
                 self.table.setItem(idx, c_idx, item)
 
         self.std_list.clear()
@@ -1075,12 +2546,13 @@ class LinuxCRUWindow(QMainWindow):
             self.std_list.addItem(empty_item)
         else:
             for idx, s in enumerate(active_std):
-                self.std_list.addItem(f"Slot {idx+1}:  {s['w']} x {s['h']} ({s['ar_name']}) @ {s['hz']} Hz")
+                self.std_list.addItem(f"Slot {idx+1}:  {s['w']} × {s['h']} ({s['ar_name']}) @ {s['hz']} Hz")
 
     def new_blank_edid(self):
         self.edid_bytes = create_blank_crt_edid()
         self.std_slots = decode_std_timings(self.edid_bytes)
         self.high_clock_dtds = []
+        self.dtd_dec_overrides = {}
         self.current_path = ""
         self.path_label.setText("Source: New Blank Profile")
         self.refresh_ui()
@@ -1089,9 +2561,14 @@ class LinuxCRUWindow(QMainWindow):
         row = max(0, self.table.currentRow())
         off = DTD_OFFSETS[row]
         block = self.edid_bytes[off:off+18]
-        dlg = DTDEditorDialog(self, decode_dtd(block, self.edid_bytes))
+        d = decode_dtd(block, self.edid_bytes)
+        ov = self.dtd_dec_overrides.get(row)
+        if d["type"] == "dtd" and ov and ov.get("hactive") == d["hactive"] and ov.get("vactive") == d["vactive"]:
+            d.update(ov)
+        dlg = DTDEditorDialog(self, d)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             res = dlg.get_result()
+            self.dtd_dec_overrides[row] = dict(res)
             self.edid_bytes[off:off+18] = encode_dtd(res, block)
             high = []
             for idx, slot_off in enumerate(DTD_OFFSETS):
@@ -1109,15 +2586,41 @@ class LinuxCRUWindow(QMainWindow):
     def clear_selected_dtd(self):
         row = max(0, self.table.currentRow())
         off = DTD_OFFSETS[row]
+        self.dtd_dec_overrides.pop(row, None)
         self.edid_bytes[off:off+18] = bytes([0, 0, 0, 0x10, 0] + [0]*13)
         sync_700mhz_and_displayid(self.edid_bytes, self._collect_high_clock_dtds(), True)
         self.refresh_ui()
 
     def clear_all_dtds(self):
+        self.dtd_dec_overrides.clear()
         for off in DTD_OFFSETS:
             self.edid_bytes[off:off+18] = bytes([0, 0, 0, 0x10, 0] + [0]*13)
         sync_700mhz_and_displayid(self.edid_bytes, [], True)
         self.refresh_ui()
+
+    def _maybe_offer_dtd_for_custom_std(self, res: dict):
+        if not res.get("custom_h"):
+            return
+        w, h, hz = res["w"], res["h"], res["hz"]
+        empty_slot = -1
+        for idx, off in enumerate(DTD_OFFSETS):
+            d = decode_dtd(self.edid_bytes[off:off+18], self.edid_bytes)
+            if d["type"] == "empty":
+                empty_slot = idx
+                break
+        if empty_slot >= 0:
+            ans = QMessageBox.question(
+                self,
+                "Add Custom Vertical Resolution to Detailed Slot?",
+                f"EDID 2-byte Standard Resolution slots only store 4 fixed aspect ratios (16:10, 4:3, 5:4, 16:9).\n\n"
+                f"Would you also like to add exact {w} × {h} @ {hz} Hz (CVT Standard) to Detailed Resolution Slot {empty_slot + 1}?",
+            )
+            if ans == QMessageBox.StandardButton.Yes:
+                dtd_res = calculate_timings("CVT Standard", w, h, float(hz), False)
+                off = DTD_OFFSETS[empty_slot]
+                self.dtd_dec_overrides[empty_slot] = dict(dtd_res)
+                self.edid_bytes[off:off+18] = encode_dtd(dtd_res, self.edid_bytes[off:off+18])
+                sync_700mhz_and_displayid(self.edid_bytes, self._collect_high_clock_dtds(), True)
 
     def add_std_res(self):
         active = [s for s in self.std_slots if s is not None]
@@ -1126,9 +2629,11 @@ class LinuxCRUWindow(QMainWindow):
             return
         dlg = StandardResDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            active.append(dlg.get_result())
+            res = dlg.get_result()
+            active.append(res)
             self.std_slots = active + [None] * (8 - len(active))
             encode_std_timings(self.edid_bytes, self.std_slots)
+            self._maybe_offer_dtd_for_custom_std(res)
             update_checksum(self.edid_bytes)
             self.refresh_ui()
 
@@ -1139,9 +2644,11 @@ class LinuxCRUWindow(QMainWindow):
             return
         dlg = StandardResDialog(self, active[row])
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            active[row] = dlg.get_result()
+            res = dlg.get_result()
+            active[row] = res
             self.std_slots = active + [None] * (8 - len(active))
             encode_std_timings(self.edid_bytes, self.std_slots)
+            self._maybe_offer_dtd_for_custom_std(res)
             update_checksum(self.edid_bytes)
             self.refresh_ui()
 
@@ -1183,18 +2690,39 @@ class LinuxCRUWindow(QMainWindow):
         self.profile_combo.addItem("Blank Template (Start Fresh)")
         self.profile_sources.append(("blank", ""))
 
-        for p in sorted(glob.glob(os.path.join(PROFILES_DIR, "*.bin"))):
-            if os.path.getsize(p) >= 128:
+        seen_paths = set()
+        seen_names = set()
+        for search_dir in (DOCS_PROFILES_DIR, os.path.expanduser("~/Documents"), LEGACY_PROFILES_DIR):
+            if not os.path.isdir(search_dir):
+                continue
+            for p in sorted(glob.glob(os.path.join(search_dir, "*.bin"))):
+                real_p = os.path.realpath(p)
+                if real_p in seen_paths or not os.path.isfile(p) or os.path.getsize(p) < 128:
+                    continue
+                try:
+                    with open(p, "rb") as f:
+                        hdr = f.read(8)
+                    if hdr != b"\x00\xff\xff\xff\xff\xff\xff\x00":
+                        continue
+                except Exception:
+                    continue
+                seen_paths.add(real_p)
                 name = os.path.splitext(os.path.basename(p))[0]
-                self.profile_combo.addItem(f"Saved Profile: {name}")
+                if name.lower() in seen_names:
+                    continue
+                seen_names.add(name.lower())
+                self.profile_combo.addItem(f"Saved Profile: {name} (Documents/linux-cru)")
                 self.profile_sources.append(("file", p))
 
         self.profile_combo.blockSignals(False)
 
     def on_port_changed(self, idx):
-        if idx < 0 or idx >= len(self.ports):
+        if idx < 0:
             return
-        self.current_port_info = self.ports[idx]
+        data = self.port_combo.itemData(idx)
+        if not isinstance(data, dict):
+            return
+        self.current_port_info = data
         self._populate_profile_combo()
         if self.profile_sources:
             self.profile_combo.setCurrentIndex(0)
@@ -1223,19 +2751,34 @@ class LinuxCRUWindow(QMainWindow):
 
     def save_named_profile(self):
         self._prepare_edid_for_save()
+        os.makedirs(DOCS_PROFILES_DIR, exist_ok=True)
         port = self.current_port_info["port"]
-        default_file = os.path.join(PROFILES_DIR, f"{port}.bin")
-        path, _ = QFileDialog.getSaveFileName(self, "Save Profile", default_file, "EDID Profile (*.bin)")
+        default_file = os.path.join(DOCS_PROFILES_DIR, f"{port}.bin")
+        path, _ = QFileDialog.getSaveFileName(self, "Save Profile to Documents/linux-cru", default_file, "EDID Profile (*.bin)")
         if path:
             if not path.endswith(".bin"):
                 path += ".bin"
             open(path, "wb").write(self.edid_bytes)
+            # Also mirror into ~/Documents/linux-cru if saved elsewhere so it always appears in the app dropdown
+            try:
+                doc_copy = os.path.join(DOCS_PROFILES_DIR, os.path.basename(path))
+                if os.path.realpath(path) != os.path.realpath(doc_copy):
+                    open(doc_copy, "wb").write(self.edid_bytes)
+            except Exception:
+                pass
             self.current_path = path
             self.path_label.setText(f"[{port}] Saved Profile: {path}")
             self._populate_profile_combo()
+            for i, (kind, src_p) in enumerate(self.profile_sources):
+                if kind == "file" and os.path.basename(src_p) == os.path.basename(path):
+                    self.profile_combo.blockSignals(True)
+                    self.profile_combo.setCurrentIndex(i)
+                    self.profile_combo.blockSignals(False)
+                    break
 
     def open_bin(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Import EDID .bin", os.path.expanduser("~"), "EDID (*.bin);;All (*)")
+        os.makedirs(DOCS_PROFILES_DIR, exist_ok=True)
+        path, _ = QFileDialog.getOpenFileName(self, "Import EDID .bin", DOCS_PROFILES_DIR, "EDID (*.bin);;All (*)")
         if path:
             data = bytearray(open(path, "rb").read())
             if len(data) >= 128:
@@ -1243,6 +2786,15 @@ class LinuxCRUWindow(QMainWindow):
                 self.auto_fix_cru_on_load()
                 self.std_slots = decode_std_timings(self.edid_bytes)
                 self.current_path = path
+                # Also copy imported .bin into ~/Documents/linux-cru so it is selectable as a profile
+                try:
+                    if path.lower().endswith(".bin") and self.edid_bytes[:8] == b"\x00\xff\xff\xff\xff\xff\xff\x00":
+                        doc_copy = os.path.join(DOCS_PROFILES_DIR, os.path.basename(path))
+                        if not os.path.exists(doc_copy):
+                            open(doc_copy, "wb").write(self.edid_bytes)
+                        self._populate_profile_combo()
+                except Exception:
+                    pass
                 self.path_label.setText(f"[{self.current_port_info['port']}] Imported: {path}")
                 self.refresh_ui()
 
@@ -1283,12 +2835,23 @@ class LinuxCRUWindow(QMainWindow):
 
     def save_bin_as(self):
         self._prepare_edid_for_save()
+        os.makedirs(DOCS_PROFILES_DIR, exist_ok=True)
         port = self.current_port_info["port"].lower()
-        path, _ = QFileDialog.getSaveFileName(self, "Export .bin", os.path.expanduser(f"~/cru-{port}.bin"), "EDID (*.bin)")
+        default_export = os.path.join(DOCS_PROFILES_DIR, f"cru-{port}.bin")
+        path, _ = QFileDialog.getSaveFileName(self, "Export .bin", default_export, "EDID (*.bin)")
         if path:
+            if not path.endswith(".bin"):
+                path += ".bin"
             open(path, "wb").write(self.edid_bytes)
+            try:
+                doc_copy = os.path.join(DOCS_PROFILES_DIR, os.path.basename(path))
+                if os.path.realpath(path) != os.path.realpath(doc_copy):
+                    open(doc_copy, "wb").write(self.edid_bytes)
+            except Exception:
+                pass
             self.current_path = path
-            self.path_label.setText(f"Exported: {path}")
+            self.path_label.setText(f"[{self.current_port_info['port']}] Exported: {path}")
+            self._populate_profile_combo()
 
     def _build_live_reload_shell_cmd(self, tmp_path):
         info = self.current_port_info
@@ -1411,20 +2974,20 @@ if __name__ == "__main__":
     sys.exit(app.exec())
 APP_EOF
 
-sudo install -m 0755 "$TMP_APP" /usr/local/bin/linux-cru
 mkdir -p "$HOME/.local/bin"
 install -m 0755 "$TMP_APP" "$HOME/.local/bin/linux-cru"
 if [ -d "$HOME/bin" ]; then
     install -m 0755 "$TMP_APP" "$HOME/bin/linux-cru"
 fi
+sudo install -m 0755 "$TMP_APP" /usr/local/bin/linux-cru || true
 
 echo "==> [3/3] Creating Desktop Launcher Shortcut..."
 mkdir -p "$HOME/.local/share/applications"
-cat << 'DESKTOP_EOF' > "$HOME/.local/share/applications/linux-cru.desktop"
+cat << DESKTOP_EOF > "$HOME/.local/share/applications/linux-cru.desktop"
 [Desktop Entry]
 Name=Linux CRU
 Comment=ToastyX-Style Custom Resolution Utility for Linux
-Exec=/usr/local/bin/linux-cru
+Exec=$HOME/.local/bin/linux-cru
 Icon=video-display
 Terminal=false
 Type=Application
