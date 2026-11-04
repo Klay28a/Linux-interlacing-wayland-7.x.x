@@ -1,0 +1,181 @@
+Index: linux-7.3/drivers/gpu/drm/amd/display/dc/link/link_validation.c
+===================================================================
+--- linux-7.3.orig/drivers/gpu/drm/amd/display/dc/link/link_validation.c	2026-11-03 20:52:33.686874554 -0500
++++ linux-7.3/drivers/gpu/drm/amd/display/dc/link/link_validation.c	2026-11-03 20:55:32.120731857 -0500
+@@ -141,8 +141,7 @@
+ 					dongle_caps->dp_hdmi_frl_max_link_bw_in_kbps)
+ 				return false;
+ 		} else { // DP to HDMI TMDS converter
+-			if (get_tmds_output_pixel_clock_100hz(timing) > (dongle_caps->dp_hdmi_max_pixel_clk_in_khz * 10))
+-				return false;
++			(void)get_tmds_output_pixel_clock_100hz(timing);
+ 		}
+ 	}
+ 
+@@ -150,14 +149,6 @@
+ 			dpcd_caps->dsc_caps.dsc_basic_caps.fields.dsc_support.DSC_PASSTHROUGH_SUPPORT == 0 &&
+ 			dongle_caps->dfp_cap_ext.supported) {
+ 
+-		if (dongle_caps->dfp_cap_ext.max_pixel_rate_in_mps < (timing->pix_clk_100hz / 10000))
+-			return false;
+-
+-		if (dongle_caps->dfp_cap_ext.max_video_h_active_width < timing->h_addressable)
+-			return false;
+-
+-		if (dongle_caps->dfp_cap_ext.max_video_v_active_height < timing->v_addressable)
+-			return false;
+ 
+ 		if (timing->pixel_encoding == PIXEL_ENCODING_RGB) {
+ 			if (!dongle_caps->dfp_cap_ext.encoding_format_caps.support_rgb)
+@@ -606,7 +597,6 @@
+ 		struct dc_link *link,
+ 		const struct dc_crtc_timing *timing)
+ {
+-	uint32_t max_pix_clk = stream->link->dongle_max_pix_clk * 10;
+ 	struct dpcd_caps *dpcd_caps = &link->dpcd_caps;
+ 
+ 	/* A hack to avoid failing any modes for EDID override feature on
+@@ -624,10 +614,6 @@
+ 		}
+ 	}
+ 
+-	/* Passive Dongle */
+-	if (max_pix_clk != 0 && get_tmds_output_pixel_clock_100hz(timing) > max_pix_clk)
+-		return DC_EXCEED_DONGLE_CAP;
+-
+ 	/* Active Dongle*/
+ 	if (!dp_active_dongle_validate_timing(timing, dpcd_caps))
+ 		return DC_EXCEED_DONGLE_CAP;
+Index: linux-7.3/drivers/gpu/drm/amd/display/dc/dio/dcn10/dcn10_link_encoder.c
+===================================================================
+--- linux-7.3.orig/drivers/gpu/drm/amd/display/dc/dio/dcn10/dcn10_link_encoder.c	2026-11-03 20:52:33.687192974 -0500
++++ linux-7.3/drivers/gpu/drm/amd/display/dc/dio/dcn10/dcn10_link_encoder.c	2026-11-03 20:55:32.120822082 -0500
+@@ -579,21 +579,12 @@
+ 	 */
+ 	if (connector_signal != SIGNAL_TYPE_DVI_DUAL_LINK &&
+ 			connector_signal != SIGNAL_TYPE_DVI_SINGLE_LINK)
+-		max_pixel_clock = enc10->base.features.max_hdmi_pixel_clock;
++		max_pixel_clock = max_t(uint32_t, enc10->base.features.max_hdmi_pixel_clock, 600000U);
+ 
+ 	/* DVI only support RGB pixel encoding */
+ 	if (crtc_timing->pixel_encoding != PIXEL_ENCODING_RGB)
+ 		return false;
+ 
+-	/*connect DVI via adpater's HDMI connector*/
+-	if ((connector_signal == SIGNAL_TYPE_DVI_SINGLE_LINK ||
+-		connector_signal == SIGNAL_TYPE_HDMI_TYPE_A) &&
+-		signal != SIGNAL_TYPE_HDMI_TYPE_A &&
+-		crtc_timing->pix_clk_100hz > (TMDS_MAX_PIXEL_CLOCK * 10))
+-		return false;
+-	if (crtc_timing->pix_clk_100hz < (TMDS_MIN_PIXEL_CLOCK * 10))
+-		return false;
+-
+ 	if (crtc_timing->pix_clk_100hz > (max_pixel_clock * 10))
+ 		return false;
+ 
+@@ -624,21 +615,17 @@
+ 			enc10->base.features.max_hdmi_deep_color;
+ 	uint32_t pix_clk_100hz = (uint32_t)adjusted_pix_clk_100hz;
+ 
+-	// check pixel clock against edid specified max TMDS clk
+-	if (edid_caps->max_tmds_clk_mhz != 0 &&
+-			pix_clk_100hz > edid_caps->max_tmds_clk_mhz * 10000)
+-		return false;
++	uint32_t max_hdmi_clk = max_t(uint32_t, enc10->base.features.max_hdmi_pixel_clock, 600000U);
++	(void)edid_caps;
+ 
+ 	if (max_deep_color < crtc_timing->display_color_depth)
+ 		return false;
+ 
+ 	if (crtc_timing->display_color_depth < COLOR_DEPTH_888)
+ 		return false;
+-	if (pix_clk_100hz < (TMDS_MIN_PIXEL_CLOCK * 10))
+-		return false;
+ 
+ 	if ((pix_clk_100hz == 0) ||
+-		(pix_clk_100hz > (enc10->base.features.max_hdmi_pixel_clock * 10)))
++		(pix_clk_100hz > (max_hdmi_clk * 10)))
+ 		return false;
+ 
+ 	/* DCE11 HW does not support 420 */
+Index: linux-7.3/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_connector.c
+===================================================================
+--- linux-7.3.orig/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_connector.c	2026-11-03 20:52:33.687593591 -0500
++++ linux-7.3/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_connector.c	2026-11-03 20:55:32.120951005 -0500
+@@ -869,7 +869,7 @@
+ 			/* The above depths are the only ones valid for HDMI. */
+ 			return false;
+ 		}
+-		if (normalized_clk <= info->max_tmds_clock) {
++		if (!info->max_tmds_clock || normalized_clk <= info->max_tmds_clock) {
+ 			timing_out->display_color_depth = depth;
+ 			return true;
+ 		}
+@@ -926,6 +926,8 @@
+ 		timing_out->vic = old_stream->timing.vic;
+ 		timing_out->flags.HSYNC_POSITIVE_POLARITY = old_stream->timing.flags.HSYNC_POSITIVE_POLARITY;
+ 		timing_out->flags.VSYNC_POSITIVE_POLARITY = old_stream->timing.flags.VSYNC_POSITIVE_POLARITY;
++		if (mode_in->flags & DRM_MODE_FLAG_INTERLACE)
++			timing_out->flags.INTERLACE = 1;
+ 	} else {
+ 		timing_out->vic = drm_match_cea_mode(mode_in);
+ 		if (mode_in->flags & DRM_MODE_FLAG_PHSYNC)
+Index: linux-7.3/drivers/gpu/drm/amd/display/dc/core/dc_resource.c
+===================================================================
+--- linux-7.3.orig/drivers/gpu/drm/amd/display/dc/core/dc_resource.c	2026-11-03 20:52:33.688373102 -0500
++++ linux-7.3/drivers/gpu/drm/amd/display/dc/core/dc_resource.c	2026-11-03 20:55:32.121200633 -0500
+@@ -1615,6 +1615,7 @@
+ 			pipe_ctx->plane_res.scl_data.lb_params.depth = LB_PIXEL_DEPTH_30BPP;
+ 
+ 		pipe_ctx->plane_res.scl_data.lb_params.alpha_en = plane_state->per_pixel_alpha;
++		pipe_ctx->plane_res.scl_data.lb_params.interleave_en = timing->flags.INTERLACE ? 1 : 0;
+ 		pipe_ctx->plane_res.scl_data.upsp = resource_is_upsp_required(plane_state->format);
+ 
+ 		// Convert pipe_ctx to respective input params for SPL
+@@ -1658,6 +1659,7 @@
+ 		pipe_ctx->plane_res.scl_data.lb_params.depth = LB_PIXEL_DEPTH_30BPP;
+ 
+ 	pipe_ctx->plane_res.scl_data.lb_params.alpha_en = plane_state->per_pixel_alpha;
++	pipe_ctx->plane_res.scl_data.lb_params.interleave_en = timing->flags.INTERLACE ? 1 : 0;
+ 
+ 	// get TAP value with 100x100 dummy data for max scaling qualify, override
+ 	// if a new scaling quality required
+Index: linux-7.3/drivers/gpu/drm/amd/display/dc/hwss/dcn401/dcn401_hwseq.c
+===================================================================
+--- linux-7.3.orig/drivers/gpu/drm/amd/display/dc/hwss/dcn401/dcn401_hwseq.c	2026-11-03 20:52:33.689098324 -0500
++++ linux-7.3/drivers/gpu/drm/amd/display/dc/hwss/dcn401/dcn401_hwseq.c	2026-11-03 20:55:32.121300881 -0500
+@@ -3813,6 +3813,7 @@
+ 			plane_state->update_bits.per_pixel_alpha_change ||
+ 			pipe_ctx->stream->update_flags.bits.scaling) {
+ 		pipe_ctx->plane_res.scl_data.lb_params.alpha_en = pipe_ctx->plane_state->per_pixel_alpha;
++		pipe_ctx->plane_res.scl_data.lb_params.interleave_en = pipe_ctx->stream->timing.flags.INTERLACE ? 1 : 0;
+ 		ASSERT(pipe_ctx->plane_res.scl_data.lb_params.depth == LB_PIXEL_DEPTH_36BPP);
+ 		hwss_add_dpp_set_scaler(seq_state, pipe_ctx->plane_res.dpp, &pipe_ctx->plane_res.scl_data);
+ 	}
+Index: linux-7.3/drivers/gpu/drm/amd/display/dc/optc/dcn10/dcn10_optc.c
+===================================================================
+--- linux-7.3.orig/drivers/gpu/drm/amd/display/dc/optc/dcn10/dcn10_optc.c	2026-11-03 20:52:33.689565280 -0500
++++ linux-7.3/drivers/gpu/drm/amd/display/dc/optc/dcn10/dcn10_optc.c	2026-11-03 20:55:32.121334498 -0500
+@@ -57,6 +57,7 @@
+ 
+ 		timing->v_front_porch = (timing->v_front_porch + 1) & ~1;
+ 		timing->v_total = (timing->v_total + 1) & ~1;
++		timing->v_sync_width = (timing->v_sync_width + 1) & ~1;
+ 
+ 	} else {
+ 		if (timing->v_front_porch < 1)
+Index: linux-7.3/drivers/gpu/drm/amd/display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+===================================================================
+--- linux-7.3.orig/drivers/gpu/drm/amd/display/dc/dpp/dcn10/dcn10_dpp_dscl.c	2026-11-03 20:52:33.689565280 -0500
++++ linux-7.3/drivers/gpu/drm/amd/display/dc/dpp/dcn10/dcn10_dpp_dscl.c	2026-11-03 20:55:32.121334498 -0500
+@@ -665,6 +665,9 @@
+ 	lb_config =  dpp1_dscl_find_lb_memory_config(dpp, scl_data);
+ 	dpp1_dscl_set_lb(dpp, &scl_data->lb_params, lb_config);
+ 
++	if (scl_data->lb_params.interleave_en)
++		dpp1_dscl_set_manual_ratio_init(dpp, scl_data);
++
+ 	if (dscl_mode == DSCL_MODE_SCALING_444_BYPASS)
+ 		return;
+ 
+

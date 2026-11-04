@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Linux Interlacing Suite
+GenericName=CRT Interlacing & RDNA DAC Suite
+Comment=Configure EDID, RDNA/GCN/NVIDIA Single & Dual-GPU setups, and 15kHz/Interlace Kernel Patches
+Exec=linux-interlace-suite
+Icon=video-display
+Terminal=false
+Categories=Settings;HardwareSettings;System;
+Keywords=CRT;EDID;Interlace;15kHz;RDNA;AMDGPU;DAC;
+StartupNotify=true
