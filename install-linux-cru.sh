@@ -49,7 +49,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, Qt
+from PyQt6.QtCore import QEvent, QTimer, Qt
 from PyQt6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -196,7 +196,7 @@ class AutoWrapLabel(QLabel):
 
 
 class NoWheelComboBox(QComboBox):
-    """QComboBox that ignores scroll wheel unless popup is open so scrolling never mutates settings."""
+    """QComboBox that ignores scroll wheel unless popup is open and auto-sizes its popup menu so items never truncate."""
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -204,8 +204,70 @@ class NoWheelComboBox(QComboBox):
         self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.setMinimumContentsLength(10)
 
+    def showPopup(self):
+        view = self.view()
+        if view is not None:
+            hint_w = view.sizeHintForColumn(0) + 32
+            view.setMinimumWidth(max(self.width(), hint_w))
+        super().showPopup()
+
     def wheelEvent(self, event):
         event.ignore()
+
+
+class AnchoredScrollArea(QScrollArea):
+    """
+    QScrollArea that remembers the user's scroll position when resizing a window larger and smaller.
+    Prevents Qt from resetting the scroll position to the top when the window is temporarily expanded.
+    """
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._user_scroll_ratio: float = 0.0
+        self._user_scroll_value: int = 0
+        self._in_resize_adjust: bool = False
+        vbar = self.verticalScrollBar()
+        vbar.valueChanged.connect(self._on_vbar_value_changed)
+        vbar.rangeChanged.connect(self._on_vbar_range_changed)
+
+    def _on_vbar_value_changed(self, val: int):
+        if self._in_resize_adjust:
+            return
+        vbar = self.verticalScrollBar()
+        mx = vbar.maximum()
+        if mx > 0:
+            self._user_scroll_value = val
+            self._user_scroll_ratio = val / float(mx)
+
+    def _on_vbar_range_changed(self, _min_v: int, max_v: int):
+        if max_v <= 0:
+            return
+        self._in_resize_adjust = True
+        try:
+            target = min(max_v, max(self._user_scroll_value, int(round(self._user_scroll_ratio * max_v))))
+            self.verticalScrollBar().setValue(target)
+        finally:
+            self._in_resize_adjust = False
+
+    def resizeEvent(self, event):
+        self._in_resize_adjust = True
+        try:
+            super().resizeEvent(event)
+            vbar = self.verticalScrollBar()
+            mx = vbar.maximum()
+            if mx > 0:
+                target = min(mx, max(self._user_scroll_value, int(round(self._user_scroll_ratio * mx))))
+                vbar.setValue(target)
+        finally:
+            QTimer.singleShot(0, self._finish_resize_adjust)
+
+    def _finish_resize_adjust(self):
+        vbar = self.verticalScrollBar()
+        mx = vbar.maximum()
+        if mx > 0:
+            target = min(mx, max(self._user_scroll_value, int(round(self._user_scroll_ratio * mx))))
+            vbar.setValue(target)
+        self._in_resize_adjust = False
 
 
 class NoWheelSpinBox(QSpinBox):
@@ -974,81 +1036,84 @@ class StandardResDialog(QDialog):
     def __init__(self, parent, initial=None):
         super().__init__(parent)
         self.setWindowTitle("Standard Resolution")
-        self.setMinimumSize(390, 310)
-        self.resize(450, 355)
+        self.setMinimumSize(460, 295)
+        self.resize(500, 315)
         self._updating = False
 
         outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(0, 0, 0, 0)
-        outer_layout.setSpacing(0)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        outer_layout.addWidget(scroll, 1)
-
-        content = QWidget()
-        content.setObjectName("dialogContent")
-        scroll.setWidget(content)
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+        outer_layout.setContentsMargins(14, 14, 14, 14)
+        outer_layout.setSpacing(10)
 
         cfg_group = QGroupBox("Standard Resolution && Refresh Rate")
         grid = QGridLayout(cfg_group)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(10)
+        grid.setContentsMargins(12, 14, 12, 12)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(9)
         grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
 
         self.mode_combo = NoWheelComboBox()
         for label, _, _ in STD_PRESETS:
             self.mode_combo.addItem(label)
-        self.mode_combo.addItem("Custom — By Aspect Ratio (Auto Height from Width)")
-        self.mode_combo.addItem("Custom — Full Resolution (Set Width × Height)")
+        self.mode_combo.addItem("Custom (By Aspect Ratio)")
+        self.mode_combo.addItem("Custom (Width × Height)")
+
+        self.ar_combo = NoWheelComboBox()
+        self.ar_combo.addItems(["16:10", "4:3", "5:4", "16:9", "Custom (Manual Height)"])
+        init_ar_idx = initial["ar_idx"] if (initial and 0 <= initial.get("ar_idx", 1) <= 3) else 1
+        self.ar_combo.setCurrentIndex(init_ar_idx)
 
         self.width_sb = NoWheelSpinBox()
         self.width_sb.setRange(256, 2288)
         self.width_sb.setSingleStep(8)
         self.width_sb.setSuffix(" px")
+        self.width_sb.setMinimumWidth(0)
+        self.width_sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.width_sb.setValue(initial["w"] if initial else 1600)
-
-        self.ar_combo = NoWheelComboBox()
-        self.ar_combo.addItems(["16:10", "4:3", "5:4", "16:9", "Custom (From Width × Height)"])
-        init_ar_idx = initial["ar_idx"] if (initial and 0 <= initial.get("ar_idx", 1) <= 3) else 1
-        self.ar_combo.setCurrentIndex(init_ar_idx)
 
         self.height_sb = NoWheelSpinBox()
         self.height_sb.setRange(160, 2048)
         self.height_sb.setSingleStep(2)
         self.height_sb.setSuffix(" px")
+        self.height_sb.setMinimumWidth(0)
+        self.height_sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         init_h = initial["h"] if initial else (1600 * ASPECT_MAP[init_ar_idx][1]) // ASPECT_MAP[init_ar_idx][2]
         self.height_sb.setValue(init_h)
 
         self.hz_sb = NoWheelSpinBox()
         self.hz_sb.setRange(60, 123)
         self.hz_sb.setSuffix(" Hz")
+        self.hz_sb.setMinimumWidth(0)
+        self.hz_sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.hz_sb.setValue(initial["hz"] if initial else 85)
 
-        grid.addWidget(QLabel("<b>Mode / Preset:</b>"), 0, 0)
-        grid.addWidget(self.mode_combo, 0, 1)
-        grid.addWidget(QLabel("<b>Horizontal (Width):</b>"), 1, 0)
-        grid.addWidget(self.width_sb, 1, 1)
-        grid.addWidget(QLabel("<b>Aspect Ratio:</b>"), 2, 0)
-        grid.addWidget(self.ar_combo, 2, 1)
-        grid.addWidget(QLabel("<b>Vertical (Height):</b>"), 3, 0)
-        grid.addWidget(self.height_sb, 3, 1)
-        grid.addWidget(QLabel("<b>Refresh Rate:</b>"), 4, 0)
-        grid.addWidget(self.hz_sb, 4, 1)
-        layout.addWidget(cfg_group)
+        hdr_font = QFont()
+        hdr_font.setBold(True)
+        for row_i, text in enumerate(("Mode / Preset:", "Aspect Ratio:", "Resolution (H × V):", "Refresh Rate:")):
+            lbl = QLabel(text)
+            lbl.setFont(hdr_font)
+            grid.addWidget(lbl, row_i, 0)
+
+        x_lbl = QLabel("×")
+        x_lbl.setFont(hdr_font)
+        x_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        grid.addWidget(self.mode_combo, 0, 1, 1, 3)
+        grid.addWidget(self.ar_combo, 1, 1, 1, 3)
+        grid.addWidget(self.width_sb, 2, 1)
+        grid.addWidget(x_lbl, 2, 2)
+        grid.addWidget(self.height_sb, 2, 3)
+        grid.addWidget(self.hz_sb, 3, 1, 1, 3)
+        outer_layout.addWidget(cfg_group)
 
         self.preview_lbl = AutoWrapLabel()
         self.preview_lbl.setObjectName("summaryMono")
-        layout.addWidget(self.preview_lbl)
+        outer_layout.addWidget(self.preview_lbl)
 
         btn_bar = QFrame()
         btn_bar.setObjectName("dialogBtnBar")
         btns = QHBoxLayout(btn_bar)
-        btns.setContentsMargins(14, 10, 14, 10)
+        btns.setContentsMargins(12, 8, 12, 8)
         btns.setSpacing(8)
         ok_btn = QPushButton("✓ Save Resolution")
         ok_btn.setObjectName("primaryBtn")
@@ -1093,16 +1158,15 @@ class StandardResDialog(QDialog):
         is_by_ar = (idx == len(STD_PRESETS))
         is_full_custom = (idx == len(STD_PRESETS) + 1)
 
-        self.width_sb.setEnabled(not is_preset)
-        self.ar_combo.setEnabled(is_by_ar or is_full_custom)
-        self.height_sb.setEnabled(is_full_custom)
-
         if is_preset:
             _, w, ar_idx = STD_PRESETS[idx]
             self.width_sb.setValue(w)
             self.ar_combo.setCurrentIndex(ar_idx)
             _, num, den = ASPECT_MAP[ar_idx]
             self.height_sb.setValue((w * num) // den)
+            self.width_sb.setEnabled(False)
+            self.ar_combo.setEnabled(False)
+            self.height_sb.setEnabled(False)
         elif is_by_ar:
             if self.ar_combo.currentIndex() > 3:
                 self.ar_combo.setCurrentIndex(1)
@@ -1110,6 +1174,15 @@ class StandardResDialog(QDialog):
             w = (self.width_sb.value() // 8) * 8
             _, num, den = ASPECT_MAP[ar_idx]
             self.height_sb.setValue((w * num) // den)
+            self.width_sb.setEnabled(True)
+            self.ar_combo.setEnabled(True)
+            # Aspect Ratio is active -> grey out Vertical (Height) to show it is auto-calculated from Width
+            self.height_sb.setEnabled(False)
+        elif is_full_custom:
+            self.ar_combo.setCurrentIndex(4)
+            self.width_sb.setEnabled(True)
+            self.ar_combo.setEnabled(True)
+            self.height_sb.setEnabled(True)
         self._updating = False
         self._update_preview()
 
@@ -1118,40 +1191,43 @@ class StandardResDialog(QDialog):
             return
         self._updating = True
         w = (self.width_sb.value() // 8) * 8
-        idx = self.mode_combo.currentIndex()
-        if idx <= len(STD_PRESETS) and self.ar_combo.currentIndex() <= 3:
+        if self.ar_combo.currentIndex() <= 3:
             ar_idx = self.ar_combo.currentIndex()
             _, num, den = ASPECT_MAP[ar_idx]
             self.height_sb.setValue((w * num) // den)
-        else:
-            matched_ar = self._match_aspect_idx(w, self.height_sb.value())
-            self.ar_combo.setCurrentIndex(matched_ar if matched_ar >= 0 else 4)
+            self.height_sb.setEnabled(False)
         self._updating = False
         self._update_preview()
 
     def on_ar_changed(self):
         if self._updating:
             return
+        self._updating = True
         ar_idx = self.ar_combo.currentIndex()
         if ar_idx <= 3:
-            self._updating = True
+            # Selecting 16:10, 4:3, 5:4, or 16:9 auto-calculates Height from Width and greys out Height!
             w = (self.width_sb.value() // 8) * 8
             _, num, den = ASPECT_MAP[ar_idx]
             self.height_sb.setValue((w * num) // den)
-            self._updating = False
+            self.height_sb.setEnabled(False)
+            if self.mode_combo.currentIndex() == len(STD_PRESETS) + 1:
+                self.mode_combo.setCurrentIndex(len(STD_PRESETS))
         else:
+            # Custom (Manual Height) selected -> unlock Height spinbox and set mode to Custom (Width x Height)
+            self.height_sb.setEnabled(True)
             if self.mode_combo.currentIndex() != len(STD_PRESETS) + 1:
                 self.mode_combo.setCurrentIndex(len(STD_PRESETS) + 1)
+        self._updating = False
         self._update_preview()
 
     def on_height_changed(self):
         if self._updating:
             return
         self._updating = True
-        w = (self.width_sb.value() // 8) * 8
-        h = self.height_sb.value()
-        matched_ar = self._match_aspect_idx(w, h)
-        self.ar_combo.setCurrentIndex(matched_ar if matched_ar >= 0 else 4)
+        if self.ar_combo.currentIndex() != 4:
+            self.ar_combo.setCurrentIndex(4)
+        if self.mode_combo.currentIndex() != len(STD_PRESETS) + 1:
+            self.mode_combo.setCurrentIndex(len(STD_PRESETS) + 1)
         self._updating = False
         self._update_preview()
 
@@ -1162,15 +1238,15 @@ class StandardResDialog(QDialog):
         matched_ar = self._match_aspect_idx(w, h)
         if matched_ar >= 0:
             ar_name = ASPECT_MAP[matched_ar][0]
-            note = f"Standard EDID Slot: {w} × {h} ({ar_name}) @ {hz} Hz"
+            mode_tag = "Auto Height by Aspect Ratio" if not self.height_sb.isEnabled() else "Custom Width × Height"
+            note = f"Output: {w} × {h} ({ar_name}) @ {hz} Hz  —  [{mode_tag}]"
         else:
             best_ar = min(ASPECT_MAP.keys(), key=lambda k: abs((w * ASPECT_MAP[k][1]) // ASPECT_MAP[k][2] - h))
             ar_name, num, den = ASPECT_MAP[best_ar]
             std_h = (w * num) // den
             note = (
-                f"Selected: {w} × {h} @ {hz} Hz (Custom Vertical Resolution)\n"
-                f"Note: Standard 2-byte EDID slots only encode 4 aspect ratios (closest: {w}×{std_h} {ar_name}); "
-                f"saving will also offer adding {w}×{h}@{hz}Hz to a Detailed Resolution slot."
+                f"Output: {w} × {h} @ {hz} Hz (Custom Height) — Standard slot stores {w}×{std_h} ({ar_name}); "
+                f"saving also offers adding {w}×{h}@{hz}Hz to Detailed Slot."
             )
         self.preview_lbl.setText(note)
 
@@ -1210,7 +1286,7 @@ class DTDEditorDialog(QDialog):
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
 
-        scroll = QScrollArea()
+        scroll = AnchoredScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         outer_layout.addWidget(scroll, 1)
@@ -2044,7 +2120,7 @@ class LinuxCRUWindow(QMainWindow):
         self.std_slots = decode_std_timings(self.edid_bytes)
         self._switching_port = False
 
-        scroll = QScrollArea()
+        scroll = AnchoredScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setCentralWidget(scroll)
@@ -2401,8 +2477,14 @@ class LinuxCRUWindow(QMainWindow):
                 background-color: #252b35; color: #f0f6fc; border: 1px solid #414a58;
                 border-radius: 6px; padding: 5px 8px; min-height: 22px; font-size: {base_pt}pt;
             }}
+            QComboBox QAbstractItemView {{
+                background-color: #1c2129; color: #f0f6fc; border: 1px solid #414a58;
+                selection-background-color: #1f6feb; selection-color: #ffffff;
+                padding: 4px; font-size: {base_pt}pt;
+            }}
             QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {{
                 background-color: #1a1e25; color: #768390; border: 1px solid #2d333b;
+                font-size: {base_pt}pt;
             }}
             QTableWidget, QListWidget {{
                 background-color: #14181f; color: #e6edf3; border: 1px solid #343c4a;
