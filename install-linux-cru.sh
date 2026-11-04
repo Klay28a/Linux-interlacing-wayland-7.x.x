@@ -32,7 +32,7 @@ Features:
     Automatic HDTV, Native PC, Native HDTV, Exact, Exact CRT, CVT Standard,
     CVT-RB Standard, CVT-RB2 Standard, GTF Standard, Manual)
   - Preserves decimal points across Refresh Rate (Hz), Horizontal Scan (kHz),
-    Pixel Clock (MHz), and ToastyX half-line (.5) interlaced vertical timings
+    and Pixel Clock (MHz)
   - Instant "Switch to Manual (Keep Values)" button that unlocks all calculated
     timings from GTF/CVT/Auto directly into Manual mode without losing values
   - Responsive, non-clipping card UI with Ctrl+Scroll / Ctrl++/- zoom scaling
