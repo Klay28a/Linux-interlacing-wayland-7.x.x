@@ -20,8 +20,23 @@ source=(
     'install-interlace-suite.sh'
     '11_linux_rdna_dp_hdmi_interlace.patch'
     'linux-interlace-suite.desktop'
+    'interlace_runner.py'
+    'interlace_gpu.py'
+    'interlace_edid.py'
+    'interlace_cmdline.py'
+    'interlace_boot.py'
+    'interlace_rules.py'
+    'interlace_state.py'
+    'interlace_setup.py'
+    'interlace_apply_rules.py'
+    'interlace_pkgbuild.py'
+    'interlace_rdna_patch.py'
+    'interlace_apply_edid.py'
+    'linux_cru.py'
 )
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
+            'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+# NOTE: keep one entry per source above (verified by tests/test_packaging.py).
 
 package() {
     install -d "$pkgdir/usr/share/linux-interlace-suite"
@@ -31,6 +46,15 @@ package() {
     install -Dm755 "$srcdir/install-linux-cru.sh" "$pkgdir/usr/share/linux-interlace-suite/install-linux-cru.sh"
     install -Dm755 "$srcdir/install-interlace-suite.sh" "$pkgdir/usr/share/linux-interlace-suite/install-interlace-suite.sh"
     install -Dm644 "$srcdir/11_linux_rdna_dp_hdmi_interlace.patch" "$pkgdir/usr/share/linux-interlace-suite/11_linux_rdna_dp_hdmi_interlace.patch"
+    # install-linux-cru.sh installs this file, so it must ship next to the script.
+    install -Dm755 "$srcdir/linux_cru.py" "$pkgdir/usr/share/linux-interlace-suite/linux_cru.py"
+
+    local mod
+    for mod in interlace_runner interlace_gpu interlace_edid interlace_cmdline interlace_boot \
+               interlace_rules interlace_state interlace_setup interlace_apply_rules \
+               interlace_pkgbuild interlace_rdna_patch interlace_apply_edid; do
+        install -Dm644 "$srcdir/$mod.py" "$pkgdir/usr/share/linux-interlace-suite/$mod.py"
+    done
 
     install -d "$pkgdir/usr/bin"
     ln -s /usr/share/linux-interlace-suite/linux-interlace-suite.py "$pkgdir/usr/bin/linux-interlace-suite"

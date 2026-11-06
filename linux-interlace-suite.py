@@ -16,9 +16,11 @@ Design & layout inspired by Safe & Secure Dual-Boot Virtual Monitor:
   - Completed/verified options automatically marked with ✓ and greyed out when appropriate
 """
 
+import contextlib
 import glob
 import html
 import json
+import logging
 import os
 import re
 import shutil
@@ -51,6 +53,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+logger = logging.getLogger("linux_interlace_suite")
 
 APP_TITLE = "Linux CRT Interlacing Suite"
 CONFIG_DIR = Path.home() / ".config" / "linux-interlace-suite"
@@ -147,34 +151,42 @@ class NoWheelComboBox(QComboBox):
 
 
 def resolve_scripts_dir(saved_dir: str = "") -> Path:
-    candidates = []
-    if saved_dir:
-        candidates.append(Path(saved_dir))
     self_dir = Path(__file__).resolve().parent
-    candidates.extend([
+    candidates = [
         self_dir,
-        Path("/usr/share/linux-interlace-suite"),
-        Path("/usr/local/share/linux-interlace-suite"),
         Path.home() / ".local" / "share" / "linux-interlace-suite",
-        Path.home() / "Projects" / "linux-interlacing-scripts",
+        Path("/usr/local/share/linux-interlace-suite"),
+        Path("/usr/share/linux-interlace-suite"),
         Path.home() / "Linux-interlacing-wayland-7.x.x",
-    ])
+    ]
+    if saved_dir:
+        sp = Path(saved_dir)
+        if sp not in candidates or sp not in (
+            Path("/usr/share/linux-interlace-suite"),
+            Path("/usr/local/share/linux-interlace-suite"),
+            Path.home() / ".local" / "share" / "linux-interlace-suite",
+        ):
+            candidates.insert(0, sp)
 
-    for cand in candidates:
-        if (cand / "setup-interlace-env.sh").exists() and (cand / "fix-interlaced-kernel.sh").exists():
-            return cand
+    valid = [
+        cand
+        for cand in candidates
+        if (cand / "setup-interlace-env.sh").exists() and (cand / "fix-interlaced-kernel.sh").exists()
+    ]
+    if valid:
+        valid.sort(key=lambda c: (c / "fix-interlaced-kernel.sh").stat().st_mtime, reverse=True)
+        return valid[0]
     return self_dir
+
 
 
 def load_config() -> dict:
     cfg = dict(DEFAULT_CONFIG)
     if CONFIG_FILE.exists():
-        try:
+        with contextlib.suppress(OSError, ValueError):
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 cfg.update(data)
-        except Exception:
-            pass
     if cfg.get("adapter_mode") not in ("auto", "dp-dac", "hdmi-dac", "analog-native"):
         cfg["adapter_mode"] = "auto"
     return cfg
@@ -183,20 +195,16 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> None:
-    try:
+    with contextlib.suppress(OSError, ValueError):
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-    except Exception:
-        pass
 
 
 def is_rdna_pci_line(line: str, devid: str) -> bool:
-    if re.search(r"Navi|RDNA|Radeon RX [56789]\d{3}", line, re.I):
+    if re.search(r"Navi|RDNA|Radeon RX [56789]\d{3}", line, re.IGNORECASE):
         return True
     devid = devid.lower()
-    if re.match(r"^(73[1-9a-f][0-9a-f]|74[0-9a-f]{2}|75[0-9a-f]{2}|15bf|15c8|163f|164d|1681|1900)$", devid):
-        return True
-    return False
+    return bool(re.match(r"^(73[1-9a-f][0-9a-f]|74[0-9a-f]{2}|75[0-9a-f]{2}|15bf|15c8|163f|164d|1681|1900)$", devid))
 
 
 
@@ -251,33 +259,31 @@ def detect_system_info() -> dict:
     try:
         out = subprocess.check_output(["lspci", "-D", "-nn"], text=True, stderr=subprocess.DEVNULL)
         for line in out.splitlines():
-            if not re.search(r"VGA|3D|Display", line, re.I):
+            if not re.search(r"VGA|3D|Display", line, re.IGNORECASE):
                 continue
             s_line = line.strip()
             info["gpus"].append(s_line)
             info["gpu_items"].append(parse_pci_gpu_line(s_line))
-            m_nv = re.search(r"\[10de:([0-9a-fA-F]{4})\]", s_line, re.I)
+            m_nv = re.search(r"\[10de:([0-9a-fA-F]{4})\]", s_line, re.IGNORECASE)
             if m_nv and not info["nv_devid"]:
                 info["nv_devid"] = m_nv.group(1).lower()
-            m_amd = re.search(r"\[1002:([0-9a-fA-F]{4})\]", s_line, re.I)
+            m_amd = re.search(r"\[1002:([0-9a-fA-F]{4})\]", s_line, re.IGNORECASE)
             if m_amd:
                 info["amd_devids"].append((s_line, m_amd.group(1).lower()))
     except Exception:
-        pass
+        logger.debug("GPU detection via lspci failed; continuing without it", exc_info=True)
 
 
     active_overrides = {}
     edid_param = Path("/sys/module/drm/parameters/edid_firmware")
     if edid_param.exists():
-        try:
+        with contextlib.suppress(OSError, ValueError):
             raw = edid_param.read_text(encoding="utf-8").strip()
             info["active_edid_fw"] = raw
             for item in raw.split(","):
                 if ":" in item:
                     k, v = item.split(":", 1)
                     active_overrides[k.strip()] = v.strip()
-        except Exception:
-            pass
     info["active_edid_map"] = active_overrides
 
     for st_path in sorted(glob.glob("/sys/class/drm/card*-*/status")):
@@ -290,19 +296,17 @@ def detect_system_info() -> dict:
             continue
         try:
             st = Path(st_path).read_text(encoding="utf-8").strip()
-        except Exception:
+        except (OSError, ValueError):
             st = "unknown"
         if port.startswith(("VGA-", "DVI-I-")):
             info["has_analog_drm"] = True
         modes_path = os.path.join(pdir, "modes")
         has_interlace_mode = False
         if os.path.exists(modes_path):
-            try:
+            with contextlib.suppress(OSError, ValueError):
                 modes_txt = Path(modes_path).read_text(encoding="utf-8")
                 if re.search(r"\d+x\d+i\b", modes_txt):
                     has_interlace_mode = True
-            except Exception:
-                pass
         if has_interlace_mode:
             info["kernel_15khz_active"] = True
         info["ports"].append({
@@ -315,14 +319,12 @@ def detect_system_info() -> dict:
 
     pkgbuild_p = Path.home() / "kernel-build" / "linux-cachyos" / "linux-cachyos" / "PKGBUILD"
     if pkgbuild_p.exists():
-        try:
+        with contextlib.suppress(OSError, ValueError):
             pb_txt = pkgbuild_p.read_text(encoding="utf-8", errors="ignore")
             if "01_linux_15khz.patch" in pb_txt:
                 info["kernel_15khz_active"] = True
             if "11_linux_rdna_dp_hdmi_interlace.patch" in pb_txt:
                 info["kernel_rdna_patch_in_pkgbuild"] = True
-        except Exception:
-            pass
 
     if info["nv_devid"] and info["amd_devids"]:
         info["recommended_profile"] = "dual-nvidia-amd"
@@ -346,7 +348,12 @@ def detect_system_info() -> dict:
         info["bootloader"] = "Limine"
     elif os.path.exists("/etc/default/grub"):
         info["bootloader"] = "GRUB"
-    elif os.path.exists("/boot/loader/loader.conf"):
+    elif (
+        os.path.exists("/boot/loader/loader.conf")
+        or os.path.exists("/efi/loader/loader.conf")
+        or os.path.exists("/boot/efi/loader/loader.conf")
+        or os.path.exists("/etc/kernel/cmdline")
+    ):
         info["bootloader"] = "systemd-boot"
 
     if shutil.which("limine-mkinitcpio"):
@@ -358,12 +365,19 @@ def detect_system_info() -> dict:
     elif shutil.which("update-initramfs"):
         info["initramfs"] = "initramfs-tools"
 
-    try:
+    with contextlib.suppress(OSError, ValueError):
         info["cmdline"] = Path("/proc/cmdline").read_text(encoding="utf-8").strip()
-    except Exception:
-        pass
+
+    info["suite_state"] = {}
+    state_file = Path("/usr/lib/firmware/edid/.interlace-suite-state.json")
+    if state_file.exists():
+        with contextlib.suppress(OSError, ValueError):
+            data = json.loads(state_file.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                info["suite_state"] = data
 
     return info
+
 
 
 def verify_gpu_profile_rules(profile: str) -> tuple[bool, str]:
@@ -421,9 +435,8 @@ def resolve_target_connector(conn_sel: str, adapter_mode: str, gpu_profile: str,
 
     def find_port(want_connected: bool, prefixes: tuple[str, ...]) -> str:
         for p in ports:
-            if p["port"].startswith(prefixes):
-                if not want_connected or p["status"] == "connected":
-                    return p["port"]
+            if p["port"].startswith(prefixes) and (not want_connected or p["status"] == "connected"):
+                return p["port"]
         return ""
 
     if adapter_mode == "dp-dac":
@@ -440,34 +453,51 @@ def resolve_target_connector(conn_sel: str, adapter_mode: str, gpu_profile: str,
 
 
 def verify_edid_env_status(conn: str, sys_info: dict, custom_edid_path: str) -> tuple[bool, str]:
-    if custom_edid_path:
-        return False, f"Custom EDID selected ({os.path.basename(custom_edid_path)}) — Click to install"
     edid_name = "crufile.bin" if conn == "VGA-1" else f"cru-{conn.lower()}.bin"
     edid_dest = Path(f"/usr/lib/firmware/edid/{edid_name}")
     rel_fw = f"edid/{edid_name}"
+
+    suite_state = sys_info.get("suite_state", {})
+    state_conns = suite_state.get("connectors", {}) if isinstance(suite_state, dict) else {}
+    conn_state = state_conns.get(conn, {}) if isinstance(state_conns, dict) else {}
+
+    if custom_edid_path:
+        already_installed_custom = False
+        if edid_dest.exists():
+            if conn_state.get("source_edid") == custom_edid_path:
+                already_installed_custom = True
+            elif os.path.exists(custom_edid_path):
+                with contextlib.suppress(OSError, ValueError):
+                    if edid_dest.stat().st_mtime >= os.path.getmtime(custom_edid_path):
+                        already_installed_custom = True
+        if not already_installed_custom:
+            return False, f"Custom EDID selected ({os.path.basename(custom_edid_path)}) — Click to install"
+
     if not edid_dest.exists():
         return False, f"Missing {edid_dest}"
 
     active_fw = sys_info.get("active_edid_map", {}).get(conn, "")
     cmdline = sys_info.get("cmdline", "")
     in_cmdline = f"{conn}:{rel_fw}" in cmdline or active_fw == rel_fw
+    in_state = conn_state.get("edid_file") == rel_fw
 
     in_boot_cfg = False
-    for bpath in ("/etc/default/limine", "/etc/default/grub"):
+    boot_files = ["/etc/default/limine", "/etc/default/grub", "/etc/kernel/cmdline"]
+    boot_files.extend(glob.glob("/boot/loader/entries/*.conf"))
+    boot_files.extend(glob.glob("/efi/loader/entries/*.conf"))
+    for bpath in boot_files:
         if os.path.exists(bpath):
-            try:
+            with contextlib.suppress(OSError, ValueError):
                 btxt = Path(bpath).read_text(encoding="utf-8", errors="ignore")
                 if f"{conn}:{rel_fw}" in btxt and f"video={conn}:e" in btxt:
                     in_boot_cfg = True
-            except Exception:
-                pass
-    if not os.path.exists("/etc/default/limine") and not os.path.exists("/etc/default/grub"):
-        in_boot_cfg = True
+                    break
 
-    ok = edid_dest.exists() and (in_cmdline or active_fw == rel_fw) and in_boot_cfg
+    ok = edid_dest.exists() and (in_state or in_cmdline or in_boot_cfg)
     if ok:
         return True, f"{conn}:{rel_fw}"
     return False, f"Not configured for {conn} yet"
+
 
 
 class InterlaceSuiteWindow(QMainWindow):
@@ -475,7 +505,9 @@ class InterlaceSuiteWindow(QMainWindow):
         super().__init__()
         self.cfg = load_config()
         self.scripts_dir = resolve_scripts_dir(self.cfg.get("scripts_dir", ""))
+        self._sync_installed_scripts()
         self.sys_info = detect_system_info()
+
         self.proc: QProcess | None = None
         self.askpass_dir: tempfile.TemporaryDirectory | None = None
         self._sudo_pw: str = ""
@@ -515,14 +547,13 @@ class InterlaceSuiteWindow(QMainWindow):
         self.installEventFilter(self)
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.Wheel:
-            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                delta = event.angleDelta().y()
-                if delta > 0:
-                    self.apply_ui_scale(self.ui_scale + 0.05)
-                elif delta < 0:
-                    self.apply_ui_scale(self.ui_scale - 0.05)
-                return True
+        if event.type() == QEvent.Type.Wheel and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.apply_ui_scale(self.ui_scale + 0.05)
+            elif delta < 0:
+                self.apply_ui_scale(self.ui_scale - 0.05)
+            return True
         return super().eventFilter(obj, event)
 
     def apply_ui_scale(self, scale: float, save: bool = True):
@@ -530,7 +561,7 @@ class InterlaceSuiteWindow(QMainWindow):
         if save:
             self.cfg["ui_scale"] = self.ui_scale
             save_config(self.cfg)
-        self.zoom_btn.setText(f"🔍 {int(round(self.ui_scale * 100))}%")
+        self.zoom_btn.setText(f"🔍 {round(self.ui_scale * 100)}%")
 
         base_pt = round(10.0 * self.ui_scale, 1)
         small_pt = round(9.0 * self.ui_scale, 1)
@@ -1180,7 +1211,7 @@ class InterlaceSuiteWindow(QMainWindow):
             item_chk = self.conn_combo.model().item(idx)
             if item_chk is not None and not item_chk.isEnabled():
                 idx = 0
-        self.conn_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.conn_combo.setCurrentIndex(max(idx, 0))
         self.conn_combo.blockSignals(False)
 
         self.update_architecture_summary()
@@ -1206,7 +1237,16 @@ class InterlaceSuiteWindow(QMainWindow):
 
 
 
-    def _update_cells_and_banner(self, prof: str, eff_conn: str, edid_ok: bool, rules_ok: bool, kern_15khz: bool, cru_ok: bool):
+    def _update_cells_and_banner(
+        self,
+        prof: str,
+        eff_conn: str,
+        edid_ok: bool,
+        edid_msg: str,
+        rules_ok: bool,
+        kern_15khz: bool,
+        cru_ok: bool,
+    ):
         self.cell_arch_val.setText(f"<code>{prof}</code>")
         self._set_badge(self.cell_arch_badge, True, "Detected")
 
@@ -1217,8 +1257,11 @@ class InterlaceSuiteWindow(QMainWindow):
         self._set_badge(self.cell_boot_badge, self.sys_info["bootloader"] != "Unknown", "Ready")
 
         fw_str = self.sys_info["active_edid_fw"] or "None active"
+        if edid_ok and eff_conn not in fw_str:
+            fw_str = edid_msg if fw_str == "None active" else f"{fw_str}, {edid_msg}"
         self.cell_edid_val.setText(f"<code>{html.escape(fw_str)}</code>")
         self._set_badge(self.cell_edid_badge, edid_ok, f"Active ({eff_conn})" if edid_ok else "Needs Setup")
+
 
         self.cell_rules_val.setText(f"Profile: <code>{prof}</code>")
         self._set_badge(self.cell_rules_badge, rules_ok, "Active" if rules_ok else "Unapplied")
@@ -1260,7 +1303,8 @@ class InterlaceSuiteWindow(QMainWindow):
         kern_15khz = bool(self.sys_info.get("kernel_15khz_active", False))
         cru_ok = bool(self.sys_info.get("linux_cru_installed", False))
 
-        self._update_cells_and_banner(prof, eff_conn, edid_ok, rules_ok, kern_15khz, cru_ok)
+        self._update_cells_and_banner(prof, eff_conn, edid_ok, edid_msg, rules_ok, kern_15khz, cru_ok)
+
 
         prof_desc = {
             "rdna-single": (
@@ -1437,7 +1481,45 @@ class InterlaceSuiteWindow(QMainWindow):
         self.cfg["include_rdna_patch"] = self.rdna_patch_chk.isChecked()
         self.cfg["scripts_dir"] = str(self.scripts_dir)
         save_config(self.cfg)
+        self._sync_installed_scripts()
         self.update_architecture_summary()
+
+    def _sync_installed_scripts(self):
+        user_share = Path.home() / ".local" / "share" / "linux-interlace-suite"
+        user_bin = Path.home() / ".local" / "bin" / "linux-interlace-suite"
+        with contextlib.suppress(OSError, ValueError):
+            if self.scripts_dir.resolve() != user_share.resolve():
+                user_share.mkdir(parents=True, exist_ok=True)
+                for fn in (
+                    "setup-interlace-env.sh",
+                    "fix-interlaced-kernel.sh",
+                    "install-linux-cru.sh",
+                    "install-interlace-suite.sh",
+                    "11_linux_rdna_dp_hdmi_interlace.patch",
+                    "linux-interlace-suite.py",
+                    "interlace_runner.py",
+                    "interlace_gpu.py",
+                    "interlace_edid.py",
+                    "interlace_cmdline.py",
+                    "interlace_boot.py",
+                    "interlace_rules.py",
+                    "interlace_state.py",
+                    "interlace_setup.py",
+                    "interlace_apply_rules.py",
+                    "interlace_pkgbuild.py",
+                    "interlace_rdna_patch.py",
+                    "interlace_apply_edid.py",
+                    "linux_cru.py",
+                ):
+                    src_f = self.scripts_dir / fn
+                    if src_f.exists():
+                        shutil.copy2(src_f, user_share / fn)
+            src_py = self.scripts_dir / "linux-interlace-suite.py"
+            if src_py.exists():
+                user_bin.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_py, user_bin)
+                user_bin.chmod(0o755)
+
 
 
     def browse_edid(self):
@@ -1461,10 +1543,8 @@ class InterlaceSuiteWindow(QMainWindow):
     def _cleanup_askpass(self):
         self.sudo_keepalive_timer.stop()
         if self.askpass_dir is not None:
-            try:
+            with contextlib.suppress(OSError, ValueError):
                 self.askpass_dir.cleanup()
-            except Exception:
-                pass
             self.askpass_dir = None
 
     def _refresh_sudo_timestamp(self):
@@ -1473,7 +1553,10 @@ class InterlaceSuiteWindow(QMainWindow):
         askpass_bin = Path(self.askpass_dir.name) / "askpass.sh"
         env = dict(os.environ)
         env["SUDO_ASKPASS"] = str(askpass_bin)
-        subprocess.run(["/usr/bin/sudo", "-A", "-v"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            ["/usr/bin/sudo", "-A", "-v"],
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
 
     def _prepare_sudo_auth(self) -> str | None:
         self._cleanup_askpass()
@@ -1486,6 +1569,7 @@ class InterlaceSuiteWindow(QMainWindow):
                 text=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                check=False,
             )
             if verify_cached.returncode == 0:
                 need_prompt = False
@@ -1506,6 +1590,7 @@ class InterlaceSuiteWindow(QMainWindow):
                     text=True,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
+                    check=False,
                 )
                 if verify.returncode == 0:
                     self._sudo_pw = pw

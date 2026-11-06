@@ -1,59 +1,104 @@
 #!/usr/bin/env bash
-# Installer for Linux CRT Interlacing Suite (GUI Manager for Interlacing Scripts)
-# Leaves linux-cru as its own standalone app while installing the Interlacing Suite GUI
-# and creating Start Menu & Desktop shortcuts.
+# Installer for the Linux CRT Interlacing Suite (GUI + scripts + tested Python modules).
+# Default: per-user install under ~/.local (no sudo). Use --system for /usr/local as well.
 set -euo pipefail
 umask 022
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUITE_SHARE_USER="$HOME/.local/share/linux-interlace-suite"
 SUITE_BIN_USER="$HOME/.local/bin/linux-interlace-suite"
+SYSTEM=0
+DRY_RUN=0
 
-echo "==> [1/3] Checking Python 3 & PyQt6..."
-if ! python3 -c "import PyQt6" >/dev/null 2>&1; then
-    if command -v pacman >/dev/null 2>&1; then
-        sudo pacman -S --needed --noconfirm python python-pyqt6
-    elif command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update && sudo apt-get install -y python3 python3-pyqt6
-    elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y python3 python3-pyqt6
-    elif command -v zypper >/dev/null 2>&1; then
-        sudo zypper install -y python3 python-PyQt6
-    fi
-else
-    echo "  -> Python 3 & PyQt6 are already installed."
-fi
+FILES=(
+    setup-interlace-env.sh fix-interlaced-kernel.sh install-linux-cru.sh install-interlace-suite.sh
+    11_linux_rdna_dp_hdmi_interlace.patch linux-interlace-suite.py linux_cru.py
+    interlace_runner.py interlace_gpu.py interlace_edid.py interlace_cmdline.py interlace_boot.py
+    interlace_rules.py interlace_state.py interlace_setup.py interlace_apply_rules.py
+    interlace_pkgbuild.py interlace_rdna_patch.py interlace_apply_edid.py
+)
 
-echo "==> [2/3] Installing Linux Interlacing Suite files to $SUITE_SHARE_USER..."
-mkdir -p "$SUITE_SHARE_USER" "$HOME/.local/bin"
+usage() {
+    cat << 'HELP_EOF'
+Usage: ./install-interlace-suite.sh [--system] [--dry-run]
 
-for f in setup-interlace-env.sh fix-interlaced-kernel.sh install-linux-cru.sh \
-         11_linux_rdna_dp_hdmi_interlace.patch linux-interlace-suite.py; do
-    if [ -f "$SCRIPT_DIR/$f" ]; then
-        cp -f "$SCRIPT_DIR/$f" "$SUITE_SHARE_USER/$f"
-    fi
+  --system    Also install to /usr/local/share and /usr/local/bin (uses sudo)
+  --dry-run   Print every command that would run; change nothing
+HELP_EOF
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --system) SYSTEM=1 ;;
+        --dry-run) DRY_RUN=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "ERROR: unknown option: $arg" >&2; usage >&2; exit 2 ;;
+    esac
 done
 
-chmod +x "$SUITE_SHARE_USER"/*.sh "$SUITE_SHARE_USER/linux-interlace-suite.py"
-chmod +x "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR/linux-interlace-suite.py" 2>/dev/null || true
+run() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '[dry-run] would run:'
+        printf ' %q' "$@"
+        printf '\n'
+    else
+        "$@"
+    fi
+}
 
-install -m 0755 "$SUITE_SHARE_USER/linux-interlace-suite.py" "$SUITE_BIN_USER"
-if [ -d "$HOME/bin" ]; then
-    install -m 0755 "$SUITE_SHARE_USER/linux-interlace-suite.py" "$HOME/bin/linux-interlace-suite"
+# Privileged commands never block on a hidden password prompt when there is no terminal.
+if [ -t 0 ] || [ -n "${SUDO_ASKPASS:-}" ]; then
+    SUDO=(sudo)
+else
+    SUDO=(sudo -n)
 fi
-if [ "$(id -u)" -eq 0 ] || sudo -n true >/dev/null 2>&1; then
-    sudo mkdir -p /usr/local/share/linux-interlace-suite /usr/local/bin
-    sudo cp -f "$SUITE_SHARE_USER"/* /usr/local/share/linux-interlace-suite/
-    sudo chmod +x /usr/local/share/linux-interlace-suite/*.sh /usr/local/share/linux-interlace-suite/linux-interlace-suite.py
-    sudo install -m 0755 "$SUITE_SHARE_USER/linux-interlace-suite.py" /usr/local/bin/linux-interlace-suite
+
+install_python_qt() {
+    if python3 -c "import PyQt6" >/dev/null 2>&1; then
+        echo "  -> Python 3 & PyQt6 are already installed."
+    elif command -v pacman >/dev/null 2>&1; then
+        run "${SUDO[@]}" pacman -S --needed --noconfirm python python-pyqt6
+    elif command -v apt-get >/dev/null 2>&1; then
+        run "${SUDO[@]}" apt-get update
+        run "${SUDO[@]}" apt-get install -y python3 python3-pyqt6
+    elif command -v dnf >/dev/null 2>&1; then
+        run "${SUDO[@]}" dnf install -y python3 python3-pyqt6
+    elif command -v zypper >/dev/null 2>&1; then
+        run "${SUDO[@]}" zypper --non-interactive install python3 python-PyQt6
+    else
+        echo "ERROR: PyQt6 is missing and no supported package manager was found." >&2
+        exit 1
+    fi
+}
+
+echo "==> [1/3] Checking Python 3 & PyQt6..."
+install_python_qt
+
+echo "==> [2/3] Installing Linux Interlacing Suite files to $SUITE_SHARE_USER..."
+run mkdir -p "$SUITE_SHARE_USER" "$HOME/.local/bin"
+for f in "${FILES[@]}"; do
+    if [ -f "$SCRIPT_DIR/$f" ]; then
+        run install -m 0755 "$SCRIPT_DIR/$f" "$SUITE_SHARE_USER/$f"
+    else
+        echo "  -> Skipping missing file: $f"
+    fi
+done
+run install -m 0755 "$SUITE_SHARE_USER/linux-interlace-suite.py" "$SUITE_BIN_USER"
+
+if [ "$SYSTEM" -eq 1 ]; then
+    echo "  -> --system: installing to /usr/local (sudo)..."
+    run "${SUDO[@]}" install -d /usr/local/share/linux-interlace-suite /usr/local/bin
+    for f in "${FILES[@]}"; do
+        [ -f "$SCRIPT_DIR/$f" ] && run "${SUDO[@]}" install -m 0755 "$SCRIPT_DIR/$f" "/usr/local/share/linux-interlace-suite/$f"
+    done
+    run "${SUDO[@]}" install -m 0755 "$SCRIPT_DIR/linux-interlace-suite.py" /usr/local/bin/linux-interlace-suite
 fi
 
 echo "==> [3/3] Creating Application Menu & Desktop shortcuts..."
-mkdir -p "$HOME/.local/share/applications"
-DESKTOP_FILE="$HOME/.local/share/applications/linux-interlace-suite.desktop"
-
-cat << DESK_EOF > "$DESKTOP_FILE"
-[Desktop Entry]
+APPS_DIR="$HOME/.local/share/applications"
+DESKTOP_FILE="$APPS_DIR/linux-interlace-suite.desktop"
+run mkdir -p "$APPS_DIR"
+DESKTOP_CONTENT="[Desktop Entry]
 Type=Application
 Name=Linux Interlacing Suite
 GenericName=CRT Interlacing & RDNA Adapter Suite
@@ -63,21 +108,23 @@ Icon=video-display
 Terminal=false
 Categories=Settings;HardwareSettings;System;
 Keywords=CRT;EDID;Interlace;15kHz;RDNA;AMDGPU;
-StartupNotify=true
-DESK_EOF
-
-chmod +x "$DESKTOP_FILE"
+StartupNotify=true"
+if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] would write $DESKTOP_FILE:"
+    printf '%s\n' "$DESKTOP_CONTENT" | sed 's/^/[dry-run]   | /'
+else
+    printf '%s\n' "$DESKTOP_CONTENT" > "$DESKTOP_FILE"
+    chmod +x "$DESKTOP_FILE"
+fi
 if [ -d "$HOME/Desktop" ]; then
-    cp -f "$DESKTOP_FILE" "$HOME/Desktop/Linux Interlacing Suite.desktop"
-    chmod +x "$HOME/Desktop/Linux Interlacing Suite.desktop"
+    run install -m 0755 "$DESKTOP_FILE" "$HOME/Desktop/Linux Interlacing Suite.desktop"
     if command -v gio >/dev/null 2>&1; then
-        gio set "$HOME/Desktop/Linux Interlacing Suite.desktop" metadata::trusted true 2>/dev/null || true
+        run gio set "$HOME/Desktop/Linux Interlacing Suite.desktop" metadata::trusted true || true
     fi
 fi
-
 if command -v update-desktop-database >/dev/null 2>&1; then
-    update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+    run update-desktop-database "$APPS_DIR" || true
 fi
 
 echo "==> Linux Interlacing Suite installed successfully!"
-echo "  -> Launch from Start Menu / Desktop ('Linux Interlacing Suite') or run: $SUITE_BIN_USER"
+echo "  -> Launch from the application menu or run: $SUITE_BIN_USER"
