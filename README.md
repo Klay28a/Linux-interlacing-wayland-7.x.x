@@ -6,24 +6,25 @@ Tested on CachyOS, `7.3` kernels, KDE Plasma Wayland, and an HP p1230 (2070sb re
 
 ---
 
-## Getting Started (Download & Install)
+## Install
 
-### Option 1: Install the Native Arch / CachyOS Package (`.pkg.tar.zst`)
-Clone the repository, enter the folder containing the `.pkg.tar.zst` package, and install it with `pacman`:
+Everything else (EDID setup, GPU rules, kernel builds, installing Linux CRU) is done from the **Linux Interlacing Suite** app, so you only need to install the app.
 
+**Arch / CachyOS** (builds and installs it as a package):
 ```bash
 git clone https://github.com/Klay28a/Linux-interlacing-wayland-7.x.x.git
 cd Linux-interlacing-wayland-7.x.x
-sudo pacman -U linux-interlace-suite-1.0.0-1-any.pkg.tar.zst
+makepkg -si
 ```
 
-### Option 2: Universal Script Installer (Arch / CachyOS, Debian / Ubuntu, Fedora, openSUSE)
+**Debian / Ubuntu, Fedora, openSUSE** (installs for your user; uses your package manager only if PyQt6 is missing):
 ```bash
 git clone https://github.com/Klay28a/Linux-interlacing-wayland-7.x.x.git
 cd Linux-interlacing-wayland-7.x.x
-chmod +x *.sh *.py
 ./install.sh
 ```
+
+Then open **Linux Interlacing Suite** from your application menu, or run `linux-interlace-suite`. Add `--dry-run` to `./install.sh` to preview what it would do.
 
 ---
 
@@ -33,11 +34,6 @@ chmod +x *.sh *.py
 
 - **Auto-Detection & Hardware Verification:** Detects your GPUs, active DRM connectors, bootloader (`Limine` / `GRUB`), initramfs tool, and 15kHz kernel status with live `✓` verification badges.
 - **One-Click Workflow:** Configure your GPU profile (`Single-GPU` or `Dual-GPU`), adapter mode (`DP DAC`, `HDMI DAC`, or `Native Analog`), and target kernel (`7.3`, `7.2`, `6.18 LTS`, `6.12 LTS`, `6.6 LTS`, `6.1 LTS`, `linux-next`), then run EDID setup, live EDID reloads, or kernel builds with a live progress bar.
-
-Launch **Linux Interlacing Suite** from your Application Menu / Desktop shortcut, or run:
-```bash
-linux-interlace-suite
-```
 
 <p align="center">
   <img height="400" alt="Linux CRT Interlacing Suite — Hardware & GPU Config" src="assets/linux-interlace-suite-1.png" />
@@ -51,10 +47,9 @@ linux-interlace-suite
 
 **Linux CRU (`linux-cru`)** is a standalone Linux alternative to ToastyX's Custom Resolution Utility (CRU). It calculates exact ToastyX timings (`CVT Standard`, `CVT-RB`, `CVT-RB2`, `GTF Standard`, `Automatic CRT/PC/HDTV`, `Exact`, `Manual`), formats interlaced resolutions using Linux full-frame vertical lines, stores user profiles in `~/Documents/linux-cru/`, and can apply EDID changes live without rebooting or install them to your initramfs/bootloader.
 
-**Install & Launch:**
+Install it with the **Install Linux CRU** button in the suite, or from a terminal in the cloned folder:
+
 ```bash
-cd Linux-interlacing-wayland-7.x.x
-chmod +x install-linux-cru.sh
 ./install-linux-cru.sh
 linux-cru
 ```
@@ -65,63 +60,20 @@ linux-cru
 
 ---
 
-## 3. Core Setup & Kernel Scripts (`setup-interlace-env.sh` & `fix-interlaced-kernel.sh`)
+## 3. Scripts
 
-These scripts can be run automatically through the **Linux Interlacing Suite** GUI or directly from the terminal:
+The suite runs these for you, but they can also be run from a terminal. Both support `--dry-run`, which prints every command and file write without changing anything. They never ask questions; privileged steps use `sudo`, which asks for your password in a terminal.
 
-- **`setup-interlace-env.sh`**: Detects your target video connector (`VGA-*`, `DVI-I-*`, `DP-*`, `HDMI-A-*`), prepares a Linux full-frame interlaced EDID in `/usr/lib/firmware/edid/`, embeds it into your initramfs (`mkinitcpio`, `dracut`, or `initramfs-tools`), updates your `Limine` or `GRUB` kernel `CMDLINE`, and reloads the EDID live into the running kernel.
-  - For manual `CMDLINE` setup details, see `u/raven2cz`'s comment on [r/archlinux](https://www.reddit.com/r/archlinux/comments/1lpjz3p/help_setting_custom_edid_for_monitor/). Example `Limine` config:
-    ```ini
-    KERNEL_CMDLINE[default]+="quiet nowatchdog splash rw rootflags=subvol=/@ root=UUID=17b88c21-6079-4146-af74-bde4fe7209fe radeon.si_support=0 amdgpu.si_support=1 radeon.cik_support=0 amdgpu.cik_support=1 drm.edid_firmware=VGA-1:edid/crufile.bin video=VGA-1:e"
-    ```
-- **`fix-interlaced-kernel.sh` (with `11_linux_rdna_dp_hdmi_interlace.patch`)**: Pulls the latest CachyOS kernel `PKGBUILD`, applies the 15kHz and interlace patches from [`D0023R/linux_kernel_15khz`](https://github.com/D0023R/linux_kernel_15khz) (`01`–`05`, `07`–`09`) plus `11_linux_rdna_dp_hdmi_interlace.patch` (unlocking RDNA 1–4 DCN interlacing and DP/HDMI DAC adapter clock/dongle limits), configures Single/Dual-GPU Wayland rules, and compiles/installs the patched kernel.
+- **`setup-interlace-env.sh`**: Detects your target video connector (`VGA-*`, `DVI-I-*`, `DP-*`, `HDMI-A-*`), writes a Linux full-frame interlaced EDID to `/usr/lib/firmware/edid/`, embeds it in your initramfs (`mkinitcpio`, `dracut` or `initramfs-tools`), adds the matching parameters to your `Limine`, `GRUB` or `systemd-boot` kernel command line, and reloads the EDID live. If no connector can be detected it stops and asks you to pass `--connector`.
+- **`fix-interlaced-kernel.sh`**: Fetches the CachyOS kernel `PKGBUILD`, applies the 15kHz and interlace patches from [`D0023R/linux_kernel_15khz`](https://github.com/D0023R/linux_kernel_15khz) (`01`–`05`, `07`–`09`) plus an RDNA 1–4 DCN interlacing and DP/HDMI DAC adapter unlock, applies your Single/Dual-GPU rules, then builds and installs the kernel. It needs an Arch-based system (`--config-only` applies just the GPU rules on any distribution) and builds with `-march=native` by default (change it with `--processor-opt`). `11_linux_rdna_dp_hdmi_interlace.patch` is kept in the repo as a reference diff against 7.3.
 
+```bash
+./setup-interlace-env.sh --dry-run
+./fix-interlaced-kernel.sh --dry-run --kernel-version 7.3
+```
 
-<br>
+For manual kernel command line setup, see `u/raven2cz`'s comment on [r/archlinux](https://www.reddit.com/r/archlinux/comments/1lpjz3p/help_setting_custom_edid_for_monitor/). Example `Limine` config:
 
----
----
-
-# Version Catalog, Changelog & Feature Comparison
-
-## Application Version Catalog
-
-| Application / Script | Current Version | Description |
-| :--- | :--- | :--- |
-| **Linux CRU (`install-linux-cru.sh` / `linux-cru`)** | **`v2.1.0`** | Standalone ToastyX-accurate Custom Resolution Utility for Linux with instant preset-to-Manual handoff, `~/Documents/linux-cru` profile management, and live DRM EDID reload |
-| **Linux Interlacing Suite (`linux-interlace-suite.py`)** | **`v1.0.0`** | Unified PyQt6 GUI manager for configuring EDID overrides, Single/Dual-GPU RDNA/GCN/NVIDIA rules, DP/HDMI DAC adapters, and 15kHz/interlaced kernel builds |
-| **Environment & EDID Setup (`setup-interlace-env.sh`)** | **`v2.0.0`** | Standalone & CLI/GUI-compatible custom EDID firmware, initramfs (`mkinitcpio`, `dracut`, `initramfs-tools`), bootloader (`Limine`, `GRUB`), and live DRM hotplug configurator |
-| **15kHz & RDNA Interlace Kernel Patcher (`fix-interlaced-kernel.sh`)** | **`v2.0.0`** | CachyOS / Arch kernel builder with `D0023R/linux_kernel_15khz` patches (`01`–`05`, `07`–`09`) + `11_linux_rdna_dp_hdmi_interlace.patch` and multi-kernel selector (`7.3`, `7.2`, `6.18`, `6.12`, `6.6`, `6.1`, `linux-next`) |
-
----
-
-## Recent Changes Log
-
-- **Linux CRU `v2.1.0` (`install-linux-cru.sh`):**
-  - Ported ToastyX CRU's exact `DetailedResolutionClass` two-pass timing calculation engine (`CVT Standard`, `CVT-RB Standard`, `CVT-RB2 Standard`, `GTF Standard`, `Automatic CRT/PC/HDTV`, `Native PC/HDTV`, `Exact`, `Exact CRT`, `Manual`).
-  - Added 3-decimal frequency precision (`Hz` / `kHz`) and live `Actual` frequency readouts.
-  - Added one-click **Switch to Manual (Keep Values)** button and ToastyX-style manual calculation anchors (`Back Porch` / `Blanking` / `Total` and `Refresh Rate` / `H-Scan Rate` / `Pixel Clock`).
-  - Added custom vertical resolution (`Width × Height`) support alongside aspect-ratio auto-calculation in Standard Resolutions.
-  - Added connected vs. disconnected port filtering in Target Port selection and `~/Documents/linux-cru` profile storage.
-  - Fixed installer failure when `~/bin` is missing and added automatic Start Menu & Desktop shortcut creation.
-  - Updated UI.
-- **Linux Interlacing Suite `v1.0.0` & RDNA DP/HDMI DAC Patch (`11_linux_rdna_dp_hdmi_interlace.patch`):**
-  - Added standalone GUI suite (`linux-interlace-suite.py`) with live hardware/kernel/EDID verification, Single-GPU vs. Dual-GPU profile selector, DP/HDMI DAC adapter mode selector, and kernel compilation progress tracking.
-  - Added `11_linux_rdna_dp_hdmi_interlace.patch` to unlock DP/HDMI DAC dongle timing caps, low/high dotclock HDMI encoder limits, and DCN line-buffer `interleave_en` programming on AMD RDNA 1 / 2 / 3 / 4 GPUs.
-
----
-
-## Linux CRU — Feature Comparison Table (Old Repo Version vs. New Version)
-
-| Category | Old Repo Version (`v1.0.0`) | New Version (`v2.1.0`) |
-| :--- | :--- | :--- |
-| **Timing Engine** | Single-pass float approximations for `Automatic CRT/PC/HDTV`, `Native PC/HDTV`, `CVT Standard`, `CVT-RB`, `CVT-RB2`, `GTF Standard`, `Manual` | Ported **ToastyX CRU's exact `DetailedResolutionClass` engine**: two-pass pixel clock & refresh refinement (`MinTimeCVT = 550000000`, `MinTimeCVTRB = 460000000`, `MinTimeGTF = 550000000`, `CPrime = 30`, `MPrime = 300`, 0.25/0.01 MHz steps) plus `Exact` & `Exact CRT` and full ToastyX lookup tables |
-| **Decimal Frequency Precision** | Refresh rate limited to 2 decimals; no editable H-Scan field | **3-decimal precision** for `Refresh Rate (Hz)` and `H-Scan Rate (kHz)`, **2-decimal precision** for `Pixel Clock (MHz)`, plus live `Actual: XXX.XXX Hz / kHz / MHz` readouts |
-| **Switch Preset → Manual** | No quick switch button; manual re-entry required | **Switch to Manual (Keep Values)** button (and dropdown switch) immediately unlocks all Horizontal, Vertical, Polarity, Refresh Rate, H-Scan, and Pixel Clock fields with the exact values calculated right before |
-| **Manual Mode Anchors** | Fixed calculation order | Radio button anchors for **Timing** (`Back Porch`, `Blanking`, `Total`) and **Frequency** (`Refresh Rate`, `H-Scan Rate`, `Pixel Clock`) |
-| **Standard Resolutions** | Only allowed entering `Width` and `Aspect Ratio` (no vertical resolution input) | Supports both **By Aspect Ratio** (auto-calculates height from width) and **Custom (`Width × Height`)** for direct vertical resolution editing |
-| **Target Port Selection** | Flat list; disconnected ports looked identical to connected ports | Separates active connected ports from disconnected/unlisted ports |
-| **Profile Storage** | Hidden in `~/.config/linux-cru/profiles` | Stored in **`~/Documents/linux-cru/`** (auto-discovers `.bin` files from `~/Documents` and `~/.config/linux-cru/profiles`) |
-| **Installer (`install-linux-cru.sh`)** | Failed when `~/bin` did not exist and exited before creating desktop shortcuts | Installs to `~/.local/bin/linux-cru` & `/usr/local/bin/linux-cru`, creates Start Menu & Desktop shortcuts, and skips redundant `pacman` prompts when `PyQt6` is already installed |
-| **UI** | Basic layout | Updated UI |
-
+```ini
+KERNEL_CMDLINE[default]+="quiet nowatchdog splash rw rootflags=subvol=/@ root=UUID=17b88c21-6079-4146-af74-bde4fe7209fe radeon.si_support=0 amdgpu.si_support=1 radeon.cik_support=0 amdgpu.cik_support=1 drm.edid_firmware=VGA-1:edid/crufile.bin video=VGA-1:e"
+```
