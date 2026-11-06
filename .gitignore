@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# makepkg output (`makepkg -si` builds in and writes into the checkout)
+/src/
+/pkg/
+*.pkg.tar.zst
