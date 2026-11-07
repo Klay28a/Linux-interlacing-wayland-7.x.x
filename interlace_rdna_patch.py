@@ -2,10 +2,9 @@
 """
 Version-independent RDNA DCN & DP/HDMI DAC interlace unlock patcher (Linux 6.1 - 7.3+).
 
-Previously a heredoc inside ``fix-interlaced-kernel.sh`` (unreachable by ruff/pytest). Each
-``unlock_*`` function is a pure ``str -> str`` transform of a kernel C source file, so tests feed
-mock C snippets. ``apply(tree, dry_run)`` patches a kernel source tree; with ``dry_run`` it only
-reports which files would change.
+Each ``unlock_*`` function is a pure ``str -> str`` transform of a kernel C source file, so it can
+be checked against mock C snippets. ``apply(tree, dry_run)`` patches a kernel source tree; with
+``dry_run`` it only reports which files would change.
 
 Usage: interlace_rdna_patch.py [--dry-run] [KERNEL_SRC_DIR]   (default: current directory)
 """

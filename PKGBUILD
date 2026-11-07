@@ -44,7 +44,7 @@ source=(
 sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
             'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
             'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
-# NOTE: keep one entry per source above (verified by tests/test_packaging.py).
+# NOTE: keep one sha256sums entry per source above.
 
 package() {
     install -d "$pkgdir/usr/share/linux-interlace-suite"

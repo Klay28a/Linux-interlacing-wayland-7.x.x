@@ -1,3 +1,0 @@
-# Only tells ruff where first-party modules live, so `ruff check .` sorts imports identically from any
-# working directory. No rule is selected, ignored or relaxed here.
-src = [".", "tests"]

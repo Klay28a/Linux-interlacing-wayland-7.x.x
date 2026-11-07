@@ -1,6 +1,11 @@
 # Python
 __pycache__/
 *.py[cod]
+
+# Developer-only: the test suite and lint/test config stay out of the repository
+/tests/
+/pytest.ini
+/ruff.toml
 .pytest_cache/
 .ruff_cache/
 
