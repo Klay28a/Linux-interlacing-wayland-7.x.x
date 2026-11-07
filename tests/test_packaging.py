@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from interlace_manifest import SUITE_FILES
+
 ROOT = Path(__file__).resolve().parent.parent
 PKGBUILD = ROOT / "PKGBUILD"
 
@@ -39,14 +41,26 @@ def test_every_python_module_is_installed_by_package():
         assert installed_explicitly or installed_in_loop, f"{src} is a source but package() never installs it"
 
 
-def test_installer_and_gui_sync_lists_cover_all_modules():
-    modules = sorted(p.name for p in ROOT.glob("interlace_*.py")) + ["linux_cru.py"]
+def test_manifest_lists_every_module_and_script_in_the_repo():
+    """interlace_manifest.SUITE_FILES is the single list the GUI/wrappers check; it must match the repo."""
+    # install.sh is the repo's one-shot bootstrap (it installs the suite); it is not part of an installed suite.
+    on_disk = {p.name for p in ROOT.glob("interlace_*.py")} | {p.name for p in ROOT.glob("*.sh")} - {"install.sh"}
+    on_disk |= {"linux_cru.py", "linux-interlace-suite.py", "11_linux_rdna_dp_hdmi_interlace.patch"}
+    assert sorted(on_disk - set(SUITE_FILES)) == [], "files in the repo but missing from SUITE_FILES"
+    assert sorted(set(SUITE_FILES) - on_disk) == [], "SUITE_FILES names files that do not exist"
+    assert len(SUITE_FILES) == len(set(SUITE_FILES))
+
+
+def test_installers_and_package_ship_every_manifest_file():
     installer = (ROOT / "install-interlace-suite.sh").read_text(encoding="utf-8")
-    gui = (ROOT / "linux-interlace-suite.py").read_text(encoding="utf-8")
-    for mod in modules:
-        assert mod in installer, f"install-interlace-suite.sh does not install {mod}"
-        assert f'"{mod}"' in gui, f"GUI _sync_installed_scripts does not copy {mod}"
-        assert f"'{mod}'" in PKGBUILD.read_text(encoding="utf-8"), f"PKGBUILD source=() lacks {mod}"
+    cru_installer = (ROOT / "install-linux-cru.sh").read_text(encoding="utf-8")
+    pkgbuild = PKGBUILD.read_text(encoding="utf-8")
+    sources = _bash_array("source")
+    for name in SUITE_FILES:
+        assert name in installer, f"install-interlace-suite.sh does not install {name}"
+        assert name in cru_installer, f"install-linux-cru.sh does not install {name}"
+        assert name in sources, f"PKGBUILD source=() lacks {name}"
+    assert "interlace_manifest" in pkgbuild
 
 
 def _import_closure(module: str) -> set[str]:

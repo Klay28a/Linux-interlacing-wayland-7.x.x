@@ -1,15 +1,19 @@
 """Shared pytest fixtures: a hermetic Host that never touches real hardware or the real filesystem."""
 
+import json
 import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from interlace_runner import Host, Runner, SystemPaths
+from interlace_runner import CommandError, Host, Runner, SystemPaths
+
+pytest_plugins = ("gui_fixtures",)  # the offscreen-Qt fixtures live in their own module
 
 LSPCI_RDNA_ONLY = "0000:03:00.0 VGA compatible controller [0300]: AMD Navi 22 [Radeon RX 6700 XT] [1002:73df]\n"
 LSPCI_NV_AMD = (
@@ -36,15 +40,27 @@ class FakeRunner(Runner):
         self.executed: list[list[str]] = []
         self.installed: dict[str, bytes] = {}
         self.queries_ok: dict[str, str] = {}
+        self.failing: dict[str, int] = {}
+        self.cwds: list[Path | None] = []
 
-    def _exec(self, cmd: Sequence[str], ok_to_fail: bool, input_text: str | None = None):
+    def _exec(
+        self, cmd: Sequence[str], ok_to_fail: bool, input_text: str | None = None,
+        *, stream: bool = False, cwd: Path | None = None,
+    ):
         argv = [str(c) for c in cmd]
         self.executed.append(argv)
+        self.cwds.append(cwd)
         if argv[0] == "lspci":
             return subprocess.CompletedProcess(argv, 0, self.lspci, "")
-        # canned output is keyed by the command's last argument (e.g. "--print-esp-path")
-        if argv[-1] in self.queries_ok:
-            return subprocess.CompletedProcess(argv, 0, self.queries_ok[argv[-1]], "")
+        key = " ".join(argv)
+        # canned results: full command line first, then the command's last argument
+        for candidate in (key, argv[-1]):
+            if candidate in self.failing:
+                if not ok_to_fail:
+                    raise CommandError(f"command failed (exit {self.failing[candidate]}): {key}")
+                return subprocess.CompletedProcess(argv, self.failing[candidate], "", "simulated failure")
+            if candidate in self.queries_ok:
+                return subprocess.CompletedProcess(argv, 0, self.queries_ok[candidate], "")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     def _install(self, path: Path, data: bytes, mode: int, privileged: bool) -> None:
@@ -77,6 +93,9 @@ def make_paths(root: Path) -> SystemPaths:
         kernel_cmdline=root / "etc/kernel/cmdline",
         loader_entry_dirs=(root / "boot/loader/entries",),
         grub_cfg_candidates=(root / "boot/grub/grub.cfg", root / "boot/grub2/grub.cfg"),
+        proc_cmdline=root / "proc/cmdline",
+        modules_dir=root / "usr/lib/modules",
+        system_bin_dirs=(root / "usr/local/bin", root / "usr/bin"),
         home=root / "home/tester",
     )
 
@@ -100,6 +119,124 @@ def sandbox(tmp_path: Path):
     paths = make_paths(tmp_path)
     assert_sandboxed(paths, tmp_path)
     return tmp_path, paths
+
+
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
+FIXTURE_NAMES = (
+    "pc_cachyos_nvme_limine_dual_gpu",
+    "pc_fedora_nvme_systemd_boot_rdna",
+    "pc_ubuntu_sata_grub_gcn",
+)
+
+
+def load_fixture(name: str) -> dict[str, Any]:
+    return json.loads((FIXTURE_DIR / f"{name}.json").read_text(encoding="utf-8"))
+
+
+def materialize_fixture(pc: dict[str, Any], root: Path) -> None:
+    """Create the mock PC's config files and DRM connectors inside the sandbox ``root``."""
+    for rel, content in pc.get("files", {}).items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    for rel in pc.get("exists", []):
+        target = root / rel.lstrip("/")
+        if not target.exists():  # files from "files" are already there; anything else is a directory
+            target.mkdir(parents=True, exist_ok=True)
+    for conn in pc["connectors"]:
+        add_connector(root, conn["name"], conn["status"], conn["card"])
+
+
+class FixtureRunner(FakeRunner):
+    """FakeRunner that answers read-only queries (lspci, uname, bootctl, pacman) from a PC fixture."""
+
+    def __init__(self, pc: dict[str, Any], dry_run: bool = False) -> None:
+        super().__init__(dry_run=dry_run, lspci=pc["lspci"])
+        self.pc = pc
+        self.queries_ok.update({"-r": pc["uname_r"] + "\n"})
+        for flag, value in pc.get("bootctl", {}).items():
+            self.queries_ok[flag] = value + "\n"
+
+    def _exec(self, cmd, ok_to_fail, input_text=None, *, stream=False, cwd=None):
+        argv = [str(c) for c in cmd]
+        if argv[0] == "pacman" and "-T" in argv:
+            self.executed.append(argv)
+            self.cwds.append(cwd)
+            return subprocess.CompletedProcess(argv, 0, "", "")  # nothing missing
+        if argv[0] == "pacman" and any(a in argv for a in ("-Qq", "-Q")):
+            self.executed.append(argv)
+            self.cwds.append(cwd)
+            return subprocess.CompletedProcess(argv, 1, "", "not installed")
+        return super()._exec(cmd, ok_to_fail, input_text, stream=stream, cwd=cwd)
+
+
+def build_fixture_host(
+    pc: dict[str, Any], root: Path, paths: SystemPaths, *, dry_run: bool = False,
+) -> tuple[Host, FixtureRunner]:
+    """A Host for ``pc``: its tools are the only ones on PATH, its files live under the sandbox ``root``."""
+    runner = FixtureRunner(pc, dry_run=dry_run)
+    present = set(pc["which"])
+    host = Host(
+        runner=runner, paths=paths,
+        which=lambda name: f"/usr/bin/{name}" if name in present else None,
+        exists=lambda p: Path(p).exists(),
+    )
+    return host, runner
+
+
+@pytest.fixture(params=FIXTURE_NAMES)
+def pc(request: pytest.FixtureRequest) -> dict[str, Any]:
+    return load_fixture(request.param)
+
+
+PATCH_SERIES = ("linux-6.1", "linux-6.6", "linux-6.12", "linux-6.18", "linux-7.2", "linux-7.3", "linux-next")
+PKGBUILD_TEXT = """pkgname=linux-cachyos
+_major=7.3
+: "${_processor_opt:=}"
+: "${_build_nvidia_open:=yes}"
+: "${_build_nvidia_580xx:=yes}"
+_nv_ver=580.95.05
+source=("a.tar.xz")
+b2sums=('x')
+
+prepare() {
+    echo "Setting config..."
+}
+"""
+
+
+def make_build_tree(tmp_path: Path, *, with_pkgbuild: bool = True, series: Sequence[str] = PATCH_SERIES) -> Path:
+    """A fake ~/kernel-build with both repos checked out (.git present) and a patch dir per series."""
+    root = tmp_path / "kb"
+    for repo in ("linux-cachyos", "linux_kernel_15khz"):
+        (root / repo / ".git").mkdir(parents=True)
+    if with_pkgbuild:
+        for sub in ("linux-cachyos", "linux-cachyos-lts", "linux-cachyos-rc"):
+            (root / "linux-cachyos" / sub).mkdir(parents=True)
+            (root / "linux-cachyos" / sub / "PKGBUILD").write_text(PKGBUILD_TEXT, encoding="utf-8")
+    for name in series:
+        d = root / "linux_kernel_15khz" / name
+        d.mkdir(parents=True)
+        for n in ("01", "02", "03", "04", "05", "06", "07", "08", "09"):
+            (d / f"{n}_{name}.patch").write_text(f"patch {n} for {name}\n", encoding="utf-8")
+    return root
+
+
+def make_suite_dir(tmp_path: Path) -> Path:
+    suite = tmp_path / "suite"
+    suite.mkdir()
+    (suite / "interlace_rdna_patch.py").write_text("# rdna\n", encoding="utf-8")
+    return suite
+
+
+def arch_pc(tmp_path: Path, *, dry_run: bool = False) -> tuple[dict[str, Any], Host, "FixtureRunner"]:
+    """The CachyOS fixture (the only Arch layout), sandboxed under ``tmp_path``."""
+    pc = load_fixture("pc_cachyos_nvme_limine_dual_gpu")
+    paths = make_paths(tmp_path)
+    assert_sandboxed(paths, tmp_path)
+    materialize_fixture(pc, tmp_path)
+    host, runner = build_fixture_host(pc, tmp_path, paths, dry_run=dry_run)
+    return pc, host, runner
 
 
 def build_host(root: Path, paths: SystemPaths, *, tools: Sequence[str] = (), dry_run: bool = False,

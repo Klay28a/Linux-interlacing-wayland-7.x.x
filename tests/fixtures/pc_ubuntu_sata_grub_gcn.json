@@ -1,0 +1,47 @@
+{
+  "name": "ubuntu-sata-grub-gcn",
+  "description": "Ubuntu 24.04 on a SATA SSD (GRUB, initramfs-tools, apt). A single old GCN card (Oland R7 250) drives the CRT over a DVI-I analog output. Not Arch: only --config-only can run here.",
+  "os_release": "NAME=\"Ubuntu\"\nID=ubuntu\nVERSION_ID=\"24.04\"\n",
+  "uname_r": "6.8.0-45-generic",
+  "which": ["apt-get", "update-grub", "grub-mkconfig", "update-initramfs", "git", "sudo"],
+  "exists": ["/etc/default/grub", "/etc/initramfs-tools", "/boot/grub"],
+  "lspci": "0000:01:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Oland [Radeon R7 250] [1002:6610]\n0000:00:1f.3 Audio device [0403]: Intel Corporation 200 Series PCH HD Audio [8086:a171]\n",
+  "connectors": [
+    {"card": "card0", "name": "DVI-I-1", "status": "connected"},
+    {"card": "card0", "name": "HDMI-A-1", "status": "disconnected"}
+  ],
+  "files": {
+    "etc/default/grub": "GRUB_DEFAULT=0\nGRUB_TIMEOUT=5\nGRUB_CMDLINE_LINUX_DEFAULT=\"quiet splash\"\nGRUB_CMDLINE_LINUX=\"\"\n"
+  },
+  "lsblk": {
+    "blockdevices": [
+      {
+        "name": "sda", "path": "/dev/sda", "id-link": "ata-Samsung_SSD_870_EVO_500GB_S6PNNX0T123456A",
+        "model": "Samsung SSD 870 EVO 500GB", "serial": "S6PNNX0T123456A", "size": "465.8G", "tran": "sata",
+        "mountpoints": [], "uuid": null, "partuuid": null, "fstype": null, "rm": false, "type": "disk",
+        "children": [
+          {"name": "sda1", "path": "/dev/sda1", "size": "512M", "mountpoints": ["/boot/efi"],
+           "uuid": "CCCC-0003", "partuuid": "44444444-aaaa-4bbb-8ccc-000000000001", "fstype": "vfat", "rm": false, "type": "part"},
+          {"name": "sda2", "path": "/dev/sda2", "size": "465.3G", "mountpoints": ["/"],
+           "uuid": "5f0e1c1a-0000-4000-8000-00000000ddd1", "partuuid": "44444444-aaaa-4bbb-8ccc-000000000002", "fstype": "ext4", "rm": false, "type": "part"}
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "package_manager": "apt-get",
+    "can_build_kernel": false,
+    "gpu_profile": "gcn-single",
+    "initramfs_command": ["update-initramfs", "-u", "-k", "all"],
+    "bootloaders": ["grub"],
+    "connector": "DVI-I-1",
+    "edid_file": "cru-dvi-i-1.bin",
+    "adapter": "analog-native",
+    "kernel_target": {"kver": "6.8", "subdir": "linux-cachyos", "commit": "origin/master", "patch_series": "linux-6.8"},
+    "udev_rule_links": [],
+    "environment_files": ["amd-dual-gpu.conf-absent", "nvidia-prime.conf-absent", "kwin-cursor.conf"],
+    "grub_cmdline_contains": ["drm.edid_firmware=DVI-I-1:edid/cru-dvi-i-1.bin", "video=DVI-I-1:e", "radeon.si_support=0", "amdgpu.cik_support=1", "quiet splash"],
+    "grub_regen_command": ["update-grub"],
+    "initramfs_hook": "crt-edid"
+  }
+}
