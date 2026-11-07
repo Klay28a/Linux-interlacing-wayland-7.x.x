@@ -61,6 +61,7 @@ from PyQt6.QtWidgets import (
 logger = logging.getLogger("linux_cru")
 
 DEFAULT_EDID_PATH = "/usr/lib/firmware/edid/crufile.bin"
+STATE_FILE = "/usr/lib/firmware/edid/.interlace-suite-state.json"
 CONFIG_DIR = os.path.expanduser("~/.config/linux-cru")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 DOCS_PROFILES_DIR = os.path.expanduser("~/Documents/linux-cru")
@@ -244,9 +245,12 @@ class AnchoredScrollArea(QScrollArea):
 
 
 class NoWheelSpinBox(QSpinBox):
+    """Commits on Enter/Tab/focus-out/arrows only, so a half-typed number is never clamped or recalculated."""
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setKeyboardTracking(False)
 
     def wheelEvent(self, event):
         if not self.hasFocus():
@@ -262,6 +266,7 @@ class NoWheelDoubleSpinBox(QDoubleSpinBox):
         super().__init__(parent)
         self.trim_trailing_zeros = trim_trailing_zeros
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setKeyboardTracking(False)
 
     def textFromValue(self, value: float) -> str:
         if self.trim_trailing_zeros:
@@ -984,21 +989,82 @@ def sync_700mhz_and_displayid(b, high_clock_dtds, unlock_700=True):
     update_checksum(b)
 
 
-def create_blank_crt_edid():
+EMPTY_DESCRIPTOR = bytes([0, 0, 0, 0x10, 0] + [0] * 13)
+RANGE_LIMITS_DESCRIPTOR = bytes([
+    0x00, 0x00, 0x00, 0xFD, 0x00,
+    30, 200, 30, 200, 70, 0x00,
+    0x0A, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+])
+ADAPTER_MODES = ("dp-dac", "hdmi-dac", "analog-native")
+DIGITAL_PORT_PREFIXES = ("DP-", "HDMI-", "DVI-D-", "eDP-")
+
+
+def video_input_byte(port: str = "", adapter_mode: str = "auto") -> int:
+    """EDID byte 20 for a port: DisplayPort 0xA5, HDMI 0xA2, analog 0x0E (same rule as ``interlace_edid.input_byte``)."""
+    digital = adapter_mode in ("dp-dac", "hdmi-dac") or port.startswith(DIGITAL_PORT_PREFIXES)
+    if not digital:
+        return 0x0E
+    return 0xA5 if (adapter_mode == "dp-dac" or port.startswith("DP-")) else 0xA2
+
+
+def recorded_adapter(port: str) -> str:
+    """The adapter mode the suite last installed an EDID with for ``port`` ('auto' when nothing is recorded)."""
+    try:
+        data = json.loads(Path(STATE_FILE).read_text(encoding="utf-8"))
+        mode = data.get("connectors", {}).get(port, {}).get("adapter_mode")
+    except (OSError, ValueError, AttributeError):
+        return "auto"
+    return mode if mode in ADAPTER_MODES else "auto"
+
+
+def create_blank_crt_edid(port: str = "", adapter_mode: str = "auto"):
+    """A blank EDID whose video input type matches the port (a DisplayPort/HDMI port needs a digital EDID)."""
     b = bytearray(128)
     b[0:8] = b'\x00\xff\xff\xff\xff\xff\xff\x00'
     b[8:12] = b'\x22\xf0\xd0\x09'
-    b[18], b[19], b[20], b[21], b[22], b[23], b[24] = 1, 3, 0x0E, 41, 31, 120, 0xEA
+    input_byte = video_input_byte(port, adapter_mode)
+    b[18], b[19], b[20], b[21], b[22], b[23], b[24] = 1, 3, input_byte, 41, 31, 120, 0xEA
+    if input_byte != 0x0E:
+        b[19] = 4
+        b[24] = (b[24] & 0xE7) | 0x03
     b[38:54] = b'\x01\x01' * 8
     for off in DTD_OFFSETS:
-        b[off:off+18] = bytes([0, 0, 0, 0x10, 0] + [0] * 13)
-    b[108:126] = bytes([
-        0x00, 0x00, 0x00, 0xFD, 0x00,
-        30, 200, 30, 200, 70, 0x00,
-        0x0A, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20
-    ])
+        b[off:off+18] = EMPTY_DESCRIPTOR
+    b[108:126] = RANGE_LIMITS_DESCRIPTOR
     update_checksum(b)
     return b
+
+
+def ensure_range_limits(b) -> bool:
+    """Add a 700 MHz range-limits descriptor to a free slot when the EDID has none. Never replaces another descriptor.
+
+    Only a truly empty slot is used: a monitor-name (0xFC) or serial (0xFF) descriptor also starts with 00 00 and
+    must survive. Returns True when ``b`` was changed.
+    """
+    if any(bytes(b[off:off + 4]) == b"\x00\x00\x00\xfd" for off in DTD_OFFSETS):
+        return False
+    for off in reversed(DTD_OFFSETS):
+        if bytes(b[off:off + 3]) == b"\x00\x00\x00" and b[off + 3] in (0x00, 0x10):
+            b[off:off + 18] = RANGE_LIMITS_DESCRIPTOR
+            return True
+    return False
+
+
+def write_file_atomic(path: str, data: bytes) -> None:
+    """Write ``data`` to ``path`` so a crash or full disk can never leave a half-written EDID profile."""
+    target = os.path.realpath(path)
+    directory = os.path.dirname(target)
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 class StandardResDialog(QDialog):
@@ -1243,7 +1309,9 @@ class DTDEditorDialog(QDialog):
         self._updating = False
         self._resp_compact = None
         self._last_hv_anchor = 0   # 0 = Back Porch, 1 = Blanking, 2 = Total
-        self._last_rate_anchor = 0 # 0 = Refresh Rate (VRate), 1 = H-Scan (HRate), 2 = Pixel Clock
+        # The selected radio is the INPUT; the other two fields of its group are calculated from it (ToastyX).
+        # Pixel clock is the default input so opening a real DTD never re-rounds its exact clock.
+        self._last_rate_anchor = 2 # 0 = Refresh Rate (VRate), 1 = H-Scan (HRate), 2 = Pixel Clock
 
         if initial_data.get("type") != "dtd":
             initial_data = calculate_timings("Automatic CRT", 1600, 1200, 85.0, False)
@@ -1369,15 +1437,15 @@ class DTDEditorDialog(QDialog):
         self.vactive_sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.vactive_sb.setValue(max(64, min(4095, vact)))
 
-        self.hfront_sb = make_h_sb(1, 1023, hfr, 8)
+        self.hfront_sb = make_h_sb(1, 1023, hfr, 1)
         self.vfront_sb = make_v_sb(1.0, 63.5, vfr_dec, 0.5)
-        self.hsync_sb = make_h_sb(1, 1023, hsy, 8)
+        self.hsync_sb = make_h_sb(1, 1023, hsy, 1)
         self.vsync_sb = make_v_sb(1.0, 63.5, vsy_dec, 0.5)
-        self.hback_sb = make_h_sb(1, 4095, hbck, 8)
+        self.hback_sb = make_h_sb(1, 4095, hbck, 1)
         self.vback_sb = make_v_sb(0.5, 4095.5, vbck_dec, 0.5)
-        self.hblank_sb = make_h_sb(2, 4095, hblk, 8)
+        self.hblank_sb = make_h_sb(2, 4095, hblk, 1)
         self.vblank_sb = make_v_sb(2.0, 4095.5, vblk_dec, 0.5)
-        self.htotal_sb = make_h_sb(66, 8190, hact + hblk, 8)
+        self.htotal_sb = make_h_sb(66, 8190, hact + hblk, 1)
         self.vtotal_sb = make_v_sb(66.0, 8190.5, vtot_dec, 0.5)
 
         self.rb_anchor_back = QRadioButton("Back Porch:")
@@ -1429,7 +1497,7 @@ class DTDEditorDialog(QDialog):
         self.rb_rate_v = QRadioButton("Refresh Rate:")
         self.rb_rate_h = QRadioButton("H-Scan Rate:")
         self.rb_rate_pclk = QRadioButton("Pixel Clock:")
-        self.rb_rate_v.setChecked(True)
+        self.rb_rate_pclk.setChecked(True)
         self.rate_anchor_group = QButtonGroup(self)
         self.rate_anchor_group.addButton(self.rb_rate_v, 0)
         self.rate_anchor_group.addButton(self.rb_rate_h, 1)
@@ -1490,18 +1558,13 @@ class DTDEditorDialog(QDialog):
         self.vactive_sb.valueChanged.connect(self.on_active_or_target_changed)
         self.refresh_sb.valueChanged.connect(self.on_refresh_changed)
         self.interlaced_cb.toggled.connect(self.on_interlaced_toggled)
-        for sb in (self.hfront_sb, self.hsync_sb):
-            sb.valueChanged.connect(self.on_h_front_or_sync_changed)
-        self.hback_sb.valueChanged.connect(self.on_h_back_changed)
-        self.hblank_sb.valueChanged.connect(self.on_h_blank_changed)
-        self.htotal_sb.valueChanged.connect(self.on_h_total_changed)
-        for sb in (self.vfront_sb, self.vsync_sb):
-            sb.valueChanged.connect(self.on_v_front_or_sync_changed)
-        self.vback_sb.valueChanged.connect(self.on_v_back_changed)
-        self.vblank_sb.valueChanged.connect(self.on_v_blank_changed)
-        self.vtotal_sb.valueChanged.connect(self.on_v_total_changed)
-        self.hscan_sb.valueChanged.connect(self.on_hscan_changed)
-        self.pclk_sb.valueChanged.connect(self.on_pclk_changed)
+        for sb in (
+            self.hfront_sb, self.hsync_sb, self.hback_sb, self.hblank_sb, self.htotal_sb,
+            self.vfront_sb, self.vsync_sb, self.vback_sb, self.vblank_sb, self.vtotal_sb,
+        ):
+            sb.valueChanged.connect(self._on_timing_input_changed)
+        self.hscan_sb.valueChanged.connect(self._on_rate_input_changed)
+        self.pclk_sb.valueChanged.connect(self._on_rate_input_changed)
         self.hsync_pos_cb.toggled.connect(self.update_live_stats)
         self.vsync_pos_cb.toggled.connect(self.update_live_stats)
 
@@ -1569,10 +1632,12 @@ class DTDEditorDialog(QDialog):
     def _on_hv_anchor_changed(self, btn_id: int, checked: bool):
         if checked:
             self._last_hv_anchor = btn_id
+            self._apply_manual_enable_state()
 
     def _on_rate_anchor_changed(self, btn_id: int, checked: bool):
         if checked:
             self._last_rate_anchor = btn_id
+            self._apply_manual_enable_state()
 
     def switch_to_manual_preserving_values(self):
         """Immediately switches from any preset (GTF, CVT, Auto, etc.) to Manual while keeping every calculated field."""
@@ -1592,15 +1657,22 @@ class DTDEditorDialog(QDialog):
         self.switch_manual_btn.setText(
             "✓ Manual Active (Unlocked)" if is_manual else "✎ Switch to Manual (Keep Values)"
         )
+        for w in (self.hfront_sb, self.hsync_sb, self.vfront_sb, self.vsync_sb, self.hsync_pos_cb, self.vsync_pos_cb):
+            w.setEnabled(is_manual)
         for w in (
-            self.hfront_sb, self.hsync_sb, self.hback_sb, self.hblank_sb, self.htotal_sb,
-            self.vfront_sb, self.vsync_sb, self.vback_sb, self.vblank_sb, self.vtotal_sb,
-            self.hscan_sb, self.pclk_sb, self.hsync_pos_cb, self.vsync_pos_cb,
             self.rb_anchor_back, self.rb_anchor_blank, self.rb_anchor_total,
             self.rb_rate_v, self.rb_rate_h, self.rb_rate_pclk,
         ):
             w.setEnabled(is_manual)
-        self.refresh_sb.setEnabled(not is_native)
+        hv_pairs = (
+            (self.hback_sb, self.vback_sb), (self.hblank_sb, self.vblank_sb), (self.htotal_sb, self.vtotal_sb),
+        )
+        for index, pair in enumerate(hv_pairs):
+            for w in pair:
+                w.setEnabled(is_manual and index == self._last_hv_anchor)
+        self.hscan_sb.setEnabled(is_manual and self._last_rate_anchor == 1)
+        self.pclk_sb.setEnabled(is_manual and self._last_rate_anchor == 2)
+        self.refresh_sb.setEnabled(not is_native and (not is_manual or self._last_rate_anchor == 0))
 
     def _sync_rates_in_manual(self):
         htotal = max(1, int(self.hactive_sb.value() + self.hblank_sb.value()))
@@ -1667,12 +1739,7 @@ class DTDEditorDialog(QDialog):
         if self._updating:
             return
         if self.preset_combo.currentText() == "Manual":
-            self._updating = True
-            self.rb_rate_v.setChecked(True)
-            self._last_rate_anchor = 0
-            self._sync_rates_in_manual()
-            self._updating = False
-            self.update_live_stats()
+            self._on_rate_input_changed()
         else:
             self.on_active_or_target_changed()
 
@@ -1719,165 +1786,82 @@ class DTDEditorDialog(QDialog):
             self.hsync_pos_cb.setChecked(bool(res["hsync_pos"]))
             self.vsync_pos_cb.setChecked(bool(res["vsync_pos"]))
         else:
-            if self._last_hv_anchor == 2:
-                hblk = max(2, self.htotal_sb.value() - self.hactive_sb.value())
-                self.hblank_sb.setValue(hblk)
-                self.hback_sb.setValue(max(1, hblk - self.hfront_sb.value() - self.hsync_sb.value()))
-                vblk = max(2.0, self.vtotal_sb.value() - float(self.vactive_sb.value()))
-                self.vblank_sb.setValue(vblk)
-                self.vback_sb.setValue(max(0.5, vblk - self.vfront_sb.value() - self.vsync_sb.value()))
-            else:
-                self.htotal_sb.setValue(self.hactive_sb.value() + self.hblank_sb.value())
-                self.vtotal_sb.setValue(float(self.vactive_sb.value()) + self.vblank_sb.value())
+            self._recalc_horizontal()
+            self._recalc_vertical()
             self._sync_rates_in_manual()
         self._updating = False
         self.update_live_stats()
 
-    def on_h_front_or_sync_changed(self):
-        if self._updating:
-            return
-        self._updating = True
-        if self._last_hv_anchor == 0:
-            hblk = min(4095, self.hfront_sb.value() + self.hsync_sb.value() + self.hback_sb.value())
-            self.hblank_sb.setValue(hblk)
-            self.htotal_sb.setValue(self.hactive_sb.value() + hblk)
-        elif self._last_hv_anchor == 1:
-            self.hback_sb.setValue(max(1, self.hblank_sb.value() - self.hfront_sb.value() - self.hsync_sb.value()))
-            self.htotal_sb.setValue(self.hactive_sb.value() + self.hblank_sb.value())
+    def _recalc_horizontal(self):
+        """Calculate the two non-selected horizontal fields from the selected one (Back porch / Blanking / Total)."""
+        act = self.hactive_sb.value()
+        fr = self.hfront_sb.value()
+        sy = self.hsync_sb.value()
+        anchor = self._last_hv_anchor
+        if anchor == 0:
+            blank = fr + sy + self.hback_sb.value()
+        elif anchor == 1:
+            blank = self.hblank_sb.value()
         else:
-            hblk = max(2, self.htotal_sb.value() - self.hactive_sb.value())
-            self.hblank_sb.setValue(hblk)
-            self.hback_sb.setValue(max(1, hblk - self.hfront_sb.value() - self.hsync_sb.value()))
-        self._sync_rates_in_manual()
-        self._updating = False
-        self.update_live_stats()
+            blank = self.htotal_sb.value() - act
+        blank = max(fr + sy + 1, min(4095, blank))
+        self.hblank_sb.setValue(blank)
+        self.hback_sb.setValue(blank - fr - sy)
+        self.htotal_sb.setValue(act + blank)
 
-    def on_h_back_changed(self):
-        if self._updating:
-            return
-        self._updating = True
-        self.rb_anchor_back.setChecked(True)
-        self._last_hv_anchor = 0
-        hblk = min(4095, self.hfront_sb.value() + self.hsync_sb.value() + self.hback_sb.value())
-        self.hblank_sb.setValue(hblk)
-        self.htotal_sb.setValue(self.hactive_sb.value() + hblk)
-        self._sync_rates_in_manual()
-        self._updating = False
-        self.update_live_stats()
-
-    def on_h_blank_changed(self):
-        if self._updating:
-            return
-        self._updating = True
-        self.rb_anchor_blank.setChecked(True)
-        self._last_hv_anchor = 1
-        min_blk = self.hfront_sb.value() + self.hsync_sb.value() + 1
-        if self.hblank_sb.value() < min_blk:
-            self.hblank_sb.setValue(min_blk)
-        self.hback_sb.setValue(self.hblank_sb.value() - self.hfront_sb.value() - self.hsync_sb.value())
-        self.htotal_sb.setValue(self.hactive_sb.value() + self.hblank_sb.value())
-        self._sync_rates_in_manual()
-        self._updating = False
-        self.update_live_stats()
-
-    def on_h_total_changed(self):
-        if self._updating:
-            return
-        self._updating = True
-        self.rb_anchor_total.setChecked(True)
-        self._last_hv_anchor = 2
-        min_tot = self.hactive_sb.value() + self.hfront_sb.value() + self.hsync_sb.value() + 1
-        if self.htotal_sb.value() < min_tot:
-            self.htotal_sb.setValue(min_tot)
-        hblk = self.htotal_sb.value() - self.hactive_sb.value()
-        self.hblank_sb.setValue(hblk)
-        self.hback_sb.setValue(hblk - self.hfront_sb.value() - self.hsync_sb.value())
-        self._sync_rates_in_manual()
-        self._updating = False
-        self.update_live_stats()
-
-    def on_v_front_or_sync_changed(self):
-        if self._updating:
-            return
-        self._updating = True
-        if self._last_hv_anchor == 0:
-            vblk = self.vfront_sb.value() + self.vsync_sb.value() + self.vback_sb.value()
-            self.vblank_sb.setValue(vblk)
-            self.vtotal_sb.setValue(float(self.vactive_sb.value()) + vblk)
-        elif self._last_hv_anchor == 1:
-            self.vback_sb.setValue(max(0.5, self.vblank_sb.value() - self.vfront_sb.value() - self.vsync_sb.value()))
-            self.vtotal_sb.setValue(float(self.vactive_sb.value()) + self.vblank_sb.value())
+    def _recalc_vertical(self):
+        """Vertical twin of _recalc_horizontal (half-line precision)."""
+        act = float(self.vactive_sb.value())
+        fr = self.vfront_sb.value()
+        sy = self.vsync_sb.value()
+        anchor = self._last_hv_anchor
+        if anchor == 0:
+            blank = fr + sy + self.vback_sb.value()
+        elif anchor == 1:
+            blank = self.vblank_sb.value()
         else:
-            vblk = max(2.0, self.vtotal_sb.value() - float(self.vactive_sb.value()))
-            self.vblank_sb.setValue(vblk)
-            self.vback_sb.setValue(max(0.5, vblk - self.vfront_sb.value() - self.vsync_sb.value()))
-        self._sync_rates_in_manual()
-        self._updating = False
-        self.update_live_stats()
+            blank = self.vtotal_sb.value() - act
+        blank = round(max(fr + sy + 0.5, min(4095.5, blank)), 1)
+        self.vblank_sb.setValue(blank)
+        self.vback_sb.setValue(round(blank - fr - sy, 1))
+        self.vtotal_sb.setValue(round(act + blank, 1))
 
-    def on_v_back_changed(self):
+    def _on_timing_input_changed(self, *_args):
+        """Any porch/sync/blank/total edit: recalculate the calculated fields, never touch the radio buttons."""
         if self._updating:
             return
         self._updating = True
-        self.rb_anchor_back.setChecked(True)
-        self._last_hv_anchor = 0
-        vblk = self.vfront_sb.value() + self.vsync_sb.value() + self.vback_sb.value()
-        self.vblank_sb.setValue(vblk)
-        self.vtotal_sb.setValue(float(self.vactive_sb.value()) + vblk)
-        self._sync_rates_in_manual()
-        self._updating = False
+        try:
+            self._recalc_horizontal()
+            self._recalc_vertical()
+            self._sync_rates_in_manual()
+        finally:
+            self._updating = False
         self.update_live_stats()
 
-    def on_v_blank_changed(self):
+    def _on_rate_input_changed(self, *_args):
+        """Pixel clock / H-scan edit: recalculate the other two rates for the selected input."""
         if self._updating:
             return
         self._updating = True
-        self.rb_anchor_blank.setChecked(True)
-        self._last_hv_anchor = 1
-        min_blk = self.vfront_sb.value() + self.vsync_sb.value() + 0.5
-        if self.vblank_sb.value() < min_blk:
-            self.vblank_sb.setValue(min_blk)
-        self.vback_sb.setValue(max(0.5, self.vblank_sb.value() - self.vfront_sb.value() - self.vsync_sb.value()))
-        self.vtotal_sb.setValue(float(self.vactive_sb.value()) + self.vblank_sb.value())
-        self._sync_rates_in_manual()
-        self._updating = False
+        try:
+            self._sync_rates_in_manual()
+        finally:
+            self._updating = False
         self.update_live_stats()
 
-    def on_v_total_changed(self):
-        if self._updating:
-            return
-        self._updating = True
-        self.rb_anchor_total.setChecked(True)
-        self._last_hv_anchor = 2
-        min_tot = float(self.vactive_sb.value()) + self.vfront_sb.value() + self.vsync_sb.value() + 0.5
-        if self.vtotal_sb.value() < min_tot:
-            self.vtotal_sb.setValue(min_tot)
-        vblk = self.vtotal_sb.value() - float(self.vactive_sb.value())
-        self.vblank_sb.setValue(vblk)
-        self.vback_sb.setValue(max(0.5, vblk - self.vfront_sb.value() - self.vsync_sb.value()))
-        self._sync_rates_in_manual()
-        self._updating = False
-        self.update_live_stats()
+    def _commit_pending_edits(self):
+        """Apply any typed-but-uncommitted number (e.g. Save pressed straight after typing)."""
+        for sb in (
+            self.hactive_sb, self.vactive_sb, self.hfront_sb, self.vfront_sb, self.hsync_sb, self.vsync_sb,
+            self.hback_sb, self.vback_sb, self.hblank_sb, self.vblank_sb, self.htotal_sb, self.vtotal_sb,
+            self.refresh_sb, self.hscan_sb, self.pclk_sb,
+        ):
+            sb.interpretText()
 
-    def on_hscan_changed(self):
-        if self._updating:
-            return
-        self._updating = True
-        self.rb_rate_h.setChecked(True)
-        self._last_rate_anchor = 1
-        self._sync_rates_in_manual()
-        self._updating = False
-        self.update_live_stats()
-
-    def on_pclk_changed(self):
-        if self._updating:
-            return
-        self._updating = True
-        self.rb_rate_pclk.setChecked(True)
-        self._last_rate_anchor = 2
-        self._sync_rates_in_manual()
-        self._updating = False
-        self.update_live_stats()
+    def accept(self):
+        self._commit_pending_edits()
+        super().accept()
 
     def update_live_stats(self):
         if self._updating:
@@ -2096,7 +2080,7 @@ class LinuxCRUWindow(QMainWindow):
         self.current_port_info = self.ports[0]
         self.current_path = ""
         self.high_clock_dtds = []
-        self.edid_bytes = create_blank_crt_edid()
+        self.edid_bytes = create_blank_crt_edid(self.current_port_info["port"])
         self.std_slots = decode_std_timings(self.edid_bytes)
         self._switching_port = False
 
@@ -2283,13 +2267,16 @@ class LinuxCRUWindow(QMainWindow):
                         continue
                     src_p = os.path.join(src_dir, fn)
                     dst_p = os.path.join(DOCS_PROFILES_DIR, fn)
-                    if os.path.isfile(src_p) and not os.path.exists(dst_p):
-                        with contextlib.suppress(OSError, ValueError):
-                            with open(src_p, "rb") as fsrc:
-                                data = fsrc.read()
-                            if len(data) >= 128 and data[:8] == b"\x00\xff\xff\xff\xff\xff\xff\x00":
-                                with open(dst_p, "wb") as fdst:
-                                    fdst.write(data)
+                    if not os.path.isfile(src_p):
+                        continue
+                    # Copy when the profile is missing, or when the source is NEWER than the copy (a stale copy
+                    # must not hide the user's later edit). A copy edited since is never overwritten.
+                    with contextlib.suppress(OSError, ValueError):
+                        if os.path.exists(dst_p) and os.path.getmtime(src_p) <= os.path.getmtime(dst_p):
+                            continue
+                        data = Path(src_p).read_bytes()
+                        if len(data) >= 128 and data[:8] == b"\x00\xff\xff\xff\xff\xff\xff\x00":
+                            write_file_atomic(dst_p, data)
 
     def _populate_port_combo(self):
         """Populates Target Port dropdown with connected ports in an active segment and disconnected ports greyed out."""
@@ -2333,10 +2320,9 @@ class LinuxCRUWindow(QMainWindow):
                 self.port_combo.addItem(label, info)
                 d_item = self.port_combo.model().item(self.port_combo.count() - 1)
                 if d_item is not None:
-                    if connected:
-                        d_item.setEnabled(False)
-                        d_item.setForeground(QBrush(QColor("#6e7681")))
-                    elif first_selectable_idx < 0:
+                    # Still selectable: you may build a profile for a port whose monitor is off or unplugged.
+                    d_item.setForeground(QBrush(QColor("#8b949e")))
+                    if first_selectable_idx < 0:
                         first_selectable_idx = self.port_combo.count() - 1
 
         missing_fallbacks = [
@@ -2366,7 +2352,6 @@ class LinuxCRUWindow(QMainWindow):
                 self.port_combo.addItem(f"○ {fb} (Pre-configure / Not currently detected)", fb_info)
                 f_item = self.port_combo.model().item(self.port_combo.count() - 1)
                 if f_item is not None:
-                    f_item.setEnabled(False)
                     f_item.setForeground(QBrush(QColor("#6e7681")))
 
         if first_selectable_idx >= 0:
@@ -2528,13 +2513,15 @@ class LinuxCRUWindow(QMainWindow):
         self.title_lbl.setAlignment(align)
         self.path_label.setAlignment(align)
 
-    def _collect_high_clock_dtds(self):
+    def _collect_high_clock_dtds(self, edid=None, remember: bool = True):
+        edid = self.edid_bytes if edid is None else edid
         high = []
         for off in DTD_OFFSETS:
-            d = decode_dtd(self.edid_bytes[off:off+18], self.edid_bytes)
+            d = decode_dtd(edid[off:off+18], edid)
             if d["type"] == "dtd" and d["pclk_mhz"] > 655.35:
                 high.append(d)
-        self.high_clock_dtds = high
+        if remember:
+            self.high_clock_dtds = high
         return high
 
     def auto_fix_cru_on_load(self):
@@ -2578,9 +2565,17 @@ class LinuxCRUWindow(QMainWindow):
                 preset = detect_timing_preset(d)
                 sync_str = f"{preset} [{pol}]"
                 is_empty = False
-            elif d["type"] == "range":
-                res_str = d.get("summary", "Monitor Range Limits")
-                rate_str = hscan_str = clk_str = sync_str = "Range Limits"
+            elif d["type"] == "range_limits":
+                res_str = "Monitor Range Limits"
+                rate_str = f"{d['v_min']}-{d['v_max']} Hz"
+                hscan_str = f"{d['h_min']}-{d['h_max']} kHz"
+                clk_str = f"max {d['max_pclk']} MHz"
+                sync_str = "Range Limits"
+                is_empty = True
+            elif d["type"] == "monitor_name":
+                res_str = f"Monitor Name: {d['name']}"
+                rate_str = hscan_str = clk_str = "-"
+                sync_str = "Name"
                 is_empty = True
             else:
                 res_str, rate_str, hscan_str, clk_str, sync_str = "(Empty)", "-", "-", "-", "-"
@@ -2606,7 +2601,8 @@ class LinuxCRUWindow(QMainWindow):
                 self.std_list.addItem(f"Slot {idx+1}:  {s['w']} × {s['h']} ({s['ar_name']}) @ {s['hz']} Hz")
 
     def new_blank_edid(self):
-        self.edid_bytes = create_blank_crt_edid()
+        port = self.current_port_info["port"]
+        self.edid_bytes = create_blank_crt_edid(port, recorded_adapter(port))
         self.std_slots = decode_std_timings(self.edid_bytes)
         self.high_clock_dtds = []
         self.dtd_dec_overrides = {}
@@ -2638,21 +2634,24 @@ class LinuxCRUWindow(QMainWindow):
                         high.append(other)
             self.high_clock_dtds = high
             sync_700mhz_and_displayid(self.edid_bytes, self.high_clock_dtds, True)
+            self._autosave()
             self.refresh_ui()
 
     def clear_selected_dtd(self):
         row = max(0, self.table.currentRow())
         off = DTD_OFFSETS[row]
         self.dtd_dec_overrides.pop(row, None)
-        self.edid_bytes[off:off+18] = bytes([0, 0, 0, 0x10, 0] + [0]*13)
+        self.edid_bytes[off:off+18] = EMPTY_DESCRIPTOR
         sync_700mhz_and_displayid(self.edid_bytes, self._collect_high_clock_dtds(), True)
+        self._autosave()
         self.refresh_ui()
 
     def clear_all_dtds(self):
         self.dtd_dec_overrides.clear()
         for off in DTD_OFFSETS:
-            self.edid_bytes[off:off+18] = bytes([0, 0, 0, 0x10, 0] + [0]*13)
+            self.edid_bytes[off:off+18] = EMPTY_DESCRIPTOR
         sync_700mhz_and_displayid(self.edid_bytes, [], True)
+        self._autosave()
         self.refresh_ui()
 
     def _maybe_offer_dtd_for_custom_std(self, res: dict):
@@ -2692,6 +2691,7 @@ class LinuxCRUWindow(QMainWindow):
             encode_std_timings(self.edid_bytes, self.std_slots)
             self._maybe_offer_dtd_for_custom_std(res)
             update_checksum(self.edid_bytes)
+            self._autosave()
             self.refresh_ui()
 
     def edit_std_res(self):
@@ -2707,6 +2707,7 @@ class LinuxCRUWindow(QMainWindow):
             encode_std_timings(self.edid_bytes, self.std_slots)
             self._maybe_offer_dtd_for_custom_std(res)
             update_checksum(self.edid_bytes)
+            self._autosave()
             self.refresh_ui()
 
     def del_std_res(self):
@@ -2717,13 +2718,90 @@ class LinuxCRUWindow(QMainWindow):
             self.std_slots = active + [None] * (8 - len(active))
             encode_std_timings(self.edid_bytes, self.std_slots)
             update_checksum(self.edid_bytes)
+            self._autosave()
             self.refresh_ui()
 
     def del_all_std_res(self):
         self.std_slots = [None] * 8
         encode_std_timings(self.edid_bytes, self.std_slots)
         update_checksum(self.edid_bytes)
+        self._autosave()
         self.refresh_ui()
+
+    # ------------------------------------------------------------------ saving
+    @staticmethod
+    def _in_documents(path: str) -> bool:
+        """True when ``path`` really lives inside ~/Documents/linux-cru (symlinks resolved)."""
+        if not path:
+            return False
+        root = os.path.realpath(DOCS_PROFILES_DIR)
+        return os.path.realpath(path).startswith(root + os.sep)
+
+    @staticmethod
+    def _unique_docs_path(stem: str) -> str:
+        """``<stem>.bin`` in the profiles folder, or ``<stem>-2.bin``, ``-3`` ... so nothing is ever overwritten."""
+        candidate = os.path.join(DOCS_PROFILES_DIR, f"{stem}.bin")
+        n = 2
+        while os.path.exists(candidate):
+            candidate = os.path.join(DOCS_PROFILES_DIR, f"{stem}-{n}.bin")
+            n += 1
+        return candidate
+
+    def _mirror_into_documents(self, path: str, data: bytes) -> str:
+        """Make sure ``data`` is available as a profile in the profiles folder and return that profile's path."""
+        if self._in_documents(path):
+            return path
+        copy = os.path.join(DOCS_PROFILES_DIR, os.path.basename(path))
+        with contextlib.suppress(OSError):
+            if os.path.exists(copy) and Path(copy).read_bytes() == data:
+                return copy
+        if os.path.exists(copy):
+            copy = self._unique_docs_path(os.path.splitext(os.path.basename(path))[0])
+        write_file_atomic(copy, data)
+        return copy
+
+    def _select_profile_path(self, path: str):
+        """Select the dropdown entry that is the same file as ``path`` (by real path, never by name)."""
+        want = os.path.realpath(path)
+        for i, (kind, src) in enumerate(self.profile_sources):
+            if kind == "file" and os.path.realpath(src) == want:
+                self.profile_combo.blockSignals(True)
+                self.profile_combo.setCurrentIndex(i)
+                self.profile_combo.blockSignals(False)
+                return
+
+    def _autosave(self) -> bool:
+        """Write the edited EDID to its profile in ~/Documents/linux-cru so no change is ever lost.
+
+        A profile already in that folder is updated in place. Anything else (a blank, the live monitor's EDID,
+        the installed firmware file, a file imported from elsewhere) is never written to: it becomes a new profile
+        named after the port, and that profile is used for every further edit.
+        """
+        port = self.current_port_info["port"]
+        self._prepare_edid_for_save()
+        target = self.current_path if self._in_documents(self.current_path) else ""
+        try:
+            target = target or self._unique_docs_path(port)
+            write_file_atomic(target, bytes(self.edid_bytes))
+        except OSError as exc:
+            self.path_label.setText(f"[{port}] NOT saved: {exc}")
+            QMessageBox.warning(self, "Profile not saved", f"Could not save your changes to {target or DOCS_PROFILES_DIR}:\n{exc}")
+            return False
+        self.current_path = target
+        self.path_label.setText(f"[{port}] Saved: {target}")
+        self._populate_profile_combo()
+        self._select_profile_path(target)
+        return True
+
+    def _edid_for_output(self) -> bytes:
+        """The EDID to export or install: the profile plus a range-limits descriptor if it has none.
+
+        Built on a copy so a slot the user left empty stays empty in the profile itself.
+        """
+        out = bytearray(self.edid_bytes)
+        ensure_range_limits(out)
+        sync_700mhz_and_displayid(out, self._collect_high_clock_dtds(out, remember=False), True)
+        return bytes(out)
 
     def _populate_profile_combo(self):
         self.profile_combo.blockSignals(True)
@@ -2745,8 +2823,7 @@ class LinuxCRUWindow(QMainWindow):
         self.profile_combo.addItem("Blank Template (Start Fresh)")
         self.profile_sources.append(("blank", ""))
 
-        seen_paths = set()
-        seen_names = set()
+        seen_paths = {os.path.realpath(src) for kind, src in self.profile_sources if kind == "file"}
         for search_dir in (DOCS_PROFILES_DIR, os.path.expanduser("~/Documents"), LEGACY_PROFILES_DIR):
             if not os.path.isdir(search_dir):
                 continue
@@ -2763,10 +2840,8 @@ class LinuxCRUWindow(QMainWindow):
                     continue
                 seen_paths.add(real_p)
                 name = os.path.splitext(os.path.basename(p))[0]
-                if name.lower() in seen_names:
-                    continue
-                seen_names.add(name.lower())
-                self.profile_combo.addItem(f"Saved Profile: {name} (Documents/linux-cru)")
+                where = os.path.basename(os.path.dirname(real_p))
+                self.profile_combo.addItem(f"Saved Profile: {name} ({where})")
                 self.profile_sources.append(("file", p))
 
         self.profile_combo.blockSignals(False)
@@ -2813,43 +2888,44 @@ class LinuxCRUWindow(QMainWindow):
         if path:
             if not path.endswith(".bin"):
                 path += ".bin"
-            Path(path).write_bytes(self.edid_bytes)
-            # Also mirror into ~/Documents/linux-cru if saved elsewhere so it always appears in the app dropdown
-            with contextlib.suppress(OSError, ValueError):
-                doc_copy = os.path.join(DOCS_PROFILES_DIR, os.path.basename(path))
-                if os.path.realpath(path) != os.path.realpath(doc_copy):
-                    Path(doc_copy).write_bytes(self.edid_bytes)
-            self.current_path = path
+            try:
+                write_file_atomic(path, bytes(self.edid_bytes))
+                profile = self._mirror_into_documents(path, bytes(self.edid_bytes))
+            except OSError as exc:
+                QMessageBox.warning(self, "Profile not saved", f"Could not save {path}:\n{exc}")
+                return
+            self.current_path = profile
             self.path_label.setText(f"[{port}] Saved Profile: {path}")
             self._populate_profile_combo()
-            for i, (kind, src_p) in enumerate(self.profile_sources):
-                if kind == "file" and os.path.basename(src_p) == os.path.basename(path):
-                    self.profile_combo.blockSignals(True)
-                    self.profile_combo.setCurrentIndex(i)
-                    self.profile_combo.blockSignals(False)
-                    break
+            self._select_profile_path(profile)
 
     def open_bin(self):
         os.makedirs(DOCS_PROFILES_DIR, exist_ok=True)
         path, _ = QFileDialog.getOpenFileName(self, "Import EDID .bin", DOCS_PROFILES_DIR, "EDID (*.bin);;All (*)")
         if path:
-            data = bytearray(Path(path).read_bytes())
-            if len(data) >= 128:
-                self.edid_bytes = data
-                self.auto_fix_cru_on_load()
-                self.std_slots = decode_std_timings(self.edid_bytes)
-                self.current_path = path
-                # Also copy imported .bin into ~/Documents/linux-cru so it is selectable as a profile
-                try:
-                    if path.lower().endswith(".bin") and self.edid_bytes[:8] == b"\x00\xff\xff\xff\xff\xff\xff\x00":
-                        doc_copy = os.path.join(DOCS_PROFILES_DIR, os.path.basename(path))
-                        if not os.path.exists(doc_copy):
-                            Path(doc_copy).write_bytes(self.edid_bytes)
-                        self._populate_profile_combo()
-                except Exception:
-                    logger.debug("could not mirror the imported EDID into the profiles folder", exc_info=True)
-                self.path_label.setText(f"[{self.current_port_info['port']}] Imported: {path}")
-                self.refresh_ui()
+            try:
+                data = bytearray(Path(path).read_bytes())
+            except OSError as exc:
+                QMessageBox.warning(self, "Cannot import", f"Could not read {path}:\n{exc}")
+                return
+            if len(data) < 128 or bytes(data[:8]) != b"\x00\xff\xff\xff\xff\xff\xff\x00":
+                QMessageBox.warning(self, "Not an EDID", f"{path} is not a valid EDID (bad header or under 128 bytes).")
+                return
+            original = bytes(data)
+            self.edid_bytes = data
+            self.auto_fix_cru_on_load()
+            self.std_slots = decode_std_timings(self.edid_bytes)
+            self.current_path = path
+            # Keep the import as a profile in ~/Documents/linux-cru. An existing profile of the same name that
+            # differs is never overwritten: the import is stored beside it under a new name.
+            try:
+                self.current_path = self._mirror_into_documents(path, original)
+                self._populate_profile_combo()
+                self._select_profile_path(self.current_path)
+            except OSError:
+                logger.debug("could not mirror the imported EDID into the profiles folder", exc_info=True)
+            self.path_label.setText(f"[{self.current_port_info['port']}] Imported: {path}")
+            self.refresh_ui()
 
     def read_drm_edid(self):
         info = self.current_port_info
@@ -2874,16 +2950,7 @@ class LinuxCRUWindow(QMainWindow):
         )
 
     def _prepare_edid_for_save(self):
-        has_fd = any(self.edid_bytes[off:off+4] == b'\x00\x00\x00\xfd' for off in DTD_OFFSETS)
-        if not has_fd:
-            for off in reversed(DTD_OFFSETS):
-                if self.edid_bytes[off] == 0 and self.edid_bytes[off+1] == 0:
-                    self.edid_bytes[off:off+18] = bytes([
-                        0x00, 0x00, 0x00, 0xFD, 0x00,
-                        30, 200, 30, 200, 70, 0x00,
-                        0x0A, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20
-                    ])
-                    break
+        """Bring the DisplayID extension and checksums in line with the DTDs. Never touches a descriptor slot."""
         sync_700mhz_and_displayid(self.edid_bytes, self._collect_high_clock_dtds(), True)
 
     def save_bin_as(self):
@@ -2895,18 +2962,17 @@ class LinuxCRUWindow(QMainWindow):
         if path:
             if not path.endswith(".bin"):
                 path += ".bin"
-            Path(path).write_bytes(self.edid_bytes)
-            with contextlib.suppress(OSError, ValueError):
-                doc_copy = os.path.join(DOCS_PROFILES_DIR, os.path.basename(path))
-                if os.path.realpath(path) != os.path.realpath(doc_copy):
-                    Path(doc_copy).write_bytes(self.edid_bytes)
-            self.current_path = path
+            try:
+                write_file_atomic(path, self._edid_for_output())
+            except OSError as exc:
+                QMessageBox.warning(self, "Export failed", f"Could not write {path}:\n{exc}")
+                return
             self.path_label.setText(f"[{self.current_port_info['port']}] Exported: {path}")
-            self._populate_profile_combo()
 
     def _run_apply_tool(self, boot: bool) -> bool:
         """Install + apply the current EDID via the shared, tested ``interlace_apply_edid.py`` (pkexec)."""
         self._prepare_edid_for_save()
+        output = self._edid_for_output()
         info = self.current_port_info
         tool = find_apply_tool()
         if tool is None:
@@ -2922,7 +2988,7 @@ class LinuxCRUWindow(QMainWindow):
             return False
 
         with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
-            tmp.write(self.edid_bytes)
+            tmp.write(output)
             tmp_name = tmp.name
         cmd = [pkexec, sys.executable, str(tool), tmp_name, "--connector", info["port"], "--rel-fw", info["rel_fw"]]
         if boot:

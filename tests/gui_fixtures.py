@@ -31,6 +31,24 @@ def qapp(gui_module):
     return gui_module.QApplication.instance() or gui_module.QApplication([])
 
 
+@pytest.fixture(scope="session")
+def cru():
+    """The Linux CRU module, loaded by path (it is a script, not a package)."""
+    pytest.importorskip("PyQt6.QtWidgets")
+    spec = importlib.util.spec_from_file_location("linux_cru_under_test", ROOT / "linux_cru.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["linux_cru_under_test"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="session")
+def app(cru):
+    from PyQt6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
+
+
 def make_window(gui_module, pc, tmp_path, monkeypatch):
     """The real window on a mock PC, with its config and HOME inside ``tmp_path``. Scripts are NOT stubbed here."""
     home = tmp_path / "home"
