@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from gui_fixtures import discard
 from interlace_edid import input_byte
 
 
@@ -47,7 +48,7 @@ def env(cru, app, tmp_path, monkeypatch):
     monkeypatch.setattr(cru.QMessageBox, "question", staticmethod(lambda *a, **_k: no))
     yield e
     for win in e.windows:
-        win.close()
+        discard(app, win)
 
 
 def dtd(cru, width=1280, height=1024, hz=85.0, interlaced=False):

@@ -144,24 +144,21 @@ class AutoWrapLabel(QLabel):
     def __init__(self, text: str = "", parent: QWidget | None = None):
         super().__init__(text, parent)
         self.setWordWrap(True)
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        # Height-for-width is declared to the layout (which then asks "how tall at THIS width?"). The size hints
+        # below deliberately do NOT read self.width(): a hint that depends on the current width, which depends on
+        # the layout, never settles and leaves the content shorter than it needs (rows squashed together).
+        policy = QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
 
     def minimumSizeHint(self):
         sh = super().minimumSizeHint()
         sh.setWidth(min(sh.width(), 120))
-        if self.wordWrap() and self.width() > 50:
-            h = self.heightForWidth(self.width())
-            if h > 0:
-                sh.setHeight(h)
         return sh
 
     def sizeHint(self):
         sh = super().sizeHint()
         sh.setWidth(min(sh.width(), 220))
-        if self.wordWrap() and self.width() > 50:
-            h = self.heightForWidth(self.width())
-            if h > 0:
-                sh.setHeight(h)
         return sh
 
     def setText(self, text: str):
@@ -223,10 +220,38 @@ class AnchoredScrollArea(QScrollArea):
         finally:
             self._in_resize_adjust = False
 
+    def setWidget(self, widget):
+        super().setWidget(widget)
+        widget.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if obj is self.widget() and event.type() == QEvent.Type.LayoutRequest:
+            QTimer.singleShot(0, self._fit_content_height)
+        return super().eventFilter(obj, event)
+
+    def _fit_content_height(self):
+        """Keep the content at least as tall as it needs AT THE CURRENT WIDTH.
+
+        Wrapped labels need more height when narrower. QScrollArea measures the content's minimum height before the
+        width is applied, so the content could end up shorter than needed and squash every row. Setting it here
+        makes the area scroll instead.
+        """
+        widget = self.widget()
+        layout = widget.layout() if widget is not None else None
+        if layout is None:
+            return
+        margins = layout.contentsMargins()
+        width = max(1, self.viewport().width())
+        needed = layout.minimumHeightForWidth(width) if layout.hasHeightForWidth() else 0
+        needed = max(needed, layout.minimumSize().height(), widget.minimumSizeHint().height())
+        if widget.minimumHeight() != needed:
+            widget.setMinimumHeight(needed + (0 if needed else margins.top() + margins.bottom()))
+
     def resizeEvent(self, event):
         self._in_resize_adjust = True
         try:
             super().resizeEvent(event)
+            self._fit_content_height()
             vbar = self.verticalScrollBar()
             mx = vbar.maximum()
             if mx > 0:
@@ -251,6 +276,7 @@ class NoWheelSpinBox(QSpinBox):
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setKeyboardTracking(False)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
 
     def wheelEvent(self, event):
         if not self.hasFocus():
@@ -267,6 +293,7 @@ class NoWheelDoubleSpinBox(QDoubleSpinBox):
         self.trim_trailing_zeros = trim_trailing_zeros
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setKeyboardTracking(False)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
 
     def textFromValue(self, value: float) -> str:
         if self.trim_trailing_zeros:
@@ -1067,25 +1094,112 @@ def write_file_atomic(path: str, data: bytes) -> None:
         raise
 
 
+def app_stylesheet(scale: float) -> str:
+    """The application stylesheet at a UI zoom ``scale``: compact, square number boxes, red for invalid values."""
+    base_pt = round(10.0 * scale, 1)
+    small_pt = round(9.0 * scale, 1)
+    title_pt = round(14.5 * scale, 1)
+    grp_pt = round(10.8 * scale, 1)
+    return f"""
+            QMainWindow, QDialog, QWidget#scrollContent, QWidget#dialogContent {{
+                background-color: #16181d; color: #e6edf3; font-size: {base_pt}pt;
+            }}
+            QScrollArea {{ border: none; background-color: #16181d; }}
+            QLabel, QRadioButton, QCheckBox {{ color: #e6edf3; font-size: {base_pt}pt; }}
+            QLabel#mainTitle {{ font-size: {title_pt}pt; font-weight: bold; color: #ffffff; }}
+            QLabel#mainSubtitle {{ font-size: {small_pt}pt; color: #9da7b3; }}
+            QLabel#bannerLabel {{ font-size: {base_pt}pt; font-weight: 600; color: #f0f6fc; }}
+            QLabel#summaryMono {{
+                background-color: #12161c; color: #e6edf3; padding: 5px 8px;
+                border: 1px solid #30363d; border-radius: 3px;
+                font-family: monospace; font-size: {small_pt}pt;
+            }}
+            QFrame#bannerCard {{
+                background-color: #192332; border: 1px solid #315a8a; border-radius: 6px;
+            }}
+            QFrame#actionCard, QFrame#dialogBtnBar {{
+                background-color: #1c2129; border: 1px solid #353e4d; border-radius: 6px;
+            }}
+            QLabel#badgeOk {{
+                background-color: #153726; color: #56d364; border: 1px solid #2ea043;
+                border-radius: 3px; padding: 2px 7px; font-size: {small_pt}pt; font-weight: bold;
+            }}
+            QLabel#badgeWarn {{
+                background-color: #3a2d13; color: #e3b341; border: 1px solid #9e6a03;
+                border-radius: 3px; padding: 2px 7px; font-size: {small_pt}pt; font-weight: bold;
+            }}
+            QGroupBox {{
+                background-color: #1c2028; border: 1px solid #343c4a; border-radius: 6px;
+                margin-top: 10px; padding: 10px 8px 6px 8px;
+                font-size: {grp_pt}pt; font-weight: bold; color: #f0f6fc;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin; subcontrol-position: top left;
+                left: 10px; padding: 0 5px; color: #79c0ff;
+            }}
+            QComboBox {{
+                background-color: #252b35; color: #f0f6fc; border: 1px solid #414a58;
+                border-radius: 3px; padding: 3px 6px; font-size: {base_pt}pt;
+            }}
+            QSpinBox, QDoubleSpinBox {{
+                background-color: #252b35; color: #f0f6fc; border: 1px solid #414a58;
+                border-radius: 0px; padding: 2px 4px; font-size: {base_pt}pt;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: #1c2129; color: #f0f6fc; border: 1px solid #414a58;
+                selection-background-color: #1f6feb; selection-color: #ffffff;
+                padding: 4px; font-size: {base_pt}pt;
+            }}
+            QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {{
+                background-color: #1a1e25; color: #768390; border: 1px solid #2d333b;
+                font-size: {base_pt}pt;
+            }}
+            QSpinBox[invalid="true"], QDoubleSpinBox[invalid="true"],
+            QSpinBox[invalid="true"]:disabled, QDoubleSpinBox[invalid="true"]:disabled {{
+                background-color: #3d1a1f; color: #ff7b72; border: 1px solid #f85149;
+            }}
+            QTableWidget, QListWidget {{
+                background-color: #14181f; color: #e6edf3; border: 1px solid #343c4a;
+                border-radius: 3px; gridline-color: #282f3a; font-size: {base_pt}pt;
+            }}
+            QHeaderView::section {{
+                background-color: #222731; color: #c9d1d9; border: none;
+                border-bottom: 1px solid #384150; border-right: 1px solid #2d3440;
+                padding: 3px 6px; font-size: {small_pt}pt; font-weight: bold;
+            }}
+            QPushButton {{
+                background-color: #2b323d; color: #f0f6fc; border: 1px solid #485263;
+                border-radius: 4px; padding: 4px 10px; font-size: {base_pt}pt; font-weight: 600;
+            }}
+            QPushButton:hover:enabled {{ background-color: #363f4e; border-color: #637085; }}
+            QPushButton:disabled {{ background-color: #1c2027; color: #6e7681; border: 1px solid #2d333d; }}
+            QPushButton#primaryBtn {{
+                background-color: #1f6feb; color: #ffffff; border: 1px solid #388bfd;
+            }}
+            QPushButton#primaryBtn:hover:enabled {{ background-color: #2a7aef; }}
+            QPushButton#accentBtn {{
+                background-color: #1b4b36; color: #7ee787; border: 1px solid #2ea043;
+            }}
+            QPushButton#accentBtn:hover:enabled {{ background-color: #235d43; }}
+"""
+
+
 class StandardResDialog(QDialog):
     def __init__(self, parent, initial=None):
         super().__init__(parent)
         self.setWindowTitle("Standard Resolution")
-        self.setMinimumSize(460, 295)
-        self.resize(500, 315)
         self._updating = False
 
         outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(14, 14, 14, 14)
-        outer_layout.setSpacing(10)
+        outer_layout.setContentsMargins(8, 8, 8, 8)
+        outer_layout.setSpacing(6)
 
         cfg_group = QGroupBox("Standard Resolution && Refresh Rate")
         grid = QGridLayout(cfg_group)
-        grid.setContentsMargins(12, 14, 12, 12)
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(9)
+        grid.setContentsMargins(8, 10, 8, 6)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
         grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(3, 1)
 
         self.mode_combo = NoWheelComboBox()
         for label, _, _ in STD_PRESETS:
@@ -1103,7 +1217,6 @@ class StandardResDialog(QDialog):
         self.width_sb.setSingleStep(8)
         self.width_sb.setSuffix(" px")
         self.width_sb.setMinimumWidth(0)
-        self.width_sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.width_sb.setValue(initial["w"] if initial else 1600)
 
         self.height_sb = NoWheelSpinBox()
@@ -1111,7 +1224,6 @@ class StandardResDialog(QDialog):
         self.height_sb.setSingleStep(2)
         self.height_sb.setSuffix(" px")
         self.height_sb.setMinimumWidth(0)
-        self.height_sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         init_h = initial["h"] if initial else (1600 * ASPECT_MAP[init_ar_idx][1]) // ASPECT_MAP[init_ar_idx][2]
         self.height_sb.setValue(init_h)
 
@@ -1119,7 +1231,6 @@ class StandardResDialog(QDialog):
         self.hz_sb.setRange(60, 123)
         self.hz_sb.setSuffix(" Hz")
         self.hz_sb.setMinimumWidth(0)
-        self.hz_sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.hz_sb.setValue(initial["hz"] if initial else 85)
 
         hdr_font = QFont()
@@ -1133,12 +1244,19 @@ class StandardResDialog(QDialog):
         x_lbl.setFont(hdr_font)
         x_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        grid.addWidget(self.mode_combo, 0, 1, 1, 3)
-        grid.addWidget(self.ar_combo, 1, 1, 1, 3)
-        grid.addWidget(self.width_sb, 2, 1)
-        grid.addWidget(x_lbl, 2, 2)
-        grid.addWidget(self.height_sb, 2, 3)
-        grid.addWidget(self.hz_sb, 3, 1, 1, 3)
+        res_row = QHBoxLayout()
+        res_row.setSpacing(6)
+        res_row.addWidget(self.width_sb)
+        res_row.addWidget(x_lbl)
+        res_row.addWidget(self.height_sb)
+        res_row.addStretch(1)
+        hz_row = QHBoxLayout()
+        hz_row.addWidget(self.hz_sb)
+        hz_row.addStretch(1)
+        grid.addWidget(self.mode_combo, 0, 1)
+        grid.addWidget(self.ar_combo, 1, 1)
+        grid.addLayout(res_row, 2, 1)
+        grid.addLayout(hz_row, 3, 1)
         outer_layout.addWidget(cfg_group)
 
         self.preview_lbl = AutoWrapLabel()
@@ -1148,7 +1266,7 @@ class StandardResDialog(QDialog):
         btn_bar = QFrame()
         btn_bar.setObjectName("dialogBtnBar")
         btns = QHBoxLayout(btn_bar)
-        btns.setContentsMargins(12, 8, 12, 8)
+        btns.setContentsMargins(8, 5, 8, 5)
         btns.setSpacing(8)
         ok_btn = QPushButton("✓ Save Resolution")
         ok_btn.setObjectName("primaryBtn")
@@ -1304,8 +1422,8 @@ class DTDEditorDialog(QDialog):
     def __init__(self, parent, initial_data):
         super().__init__(parent)
         self.setWindowTitle("Detailed Resolution — ToastyX Timing & Manual Editor")
-        self.setMinimumSize(360, 420)
-        self.resize(620, 680)
+        self.setMinimumSize(340, 360)
+        self.resize(500, 580)
         self._updating = False
         self._resp_compact = None
         self._last_hv_anchor = 0   # 0 = Back Porch, 1 = Blanking, 2 = Total
@@ -1332,13 +1450,13 @@ class DTDEditorDialog(QDialog):
         content.setObjectName("dialogContent")
         scroll.setWidget(content)
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
 
         top_group = QGroupBox("Timing Standard && Target Refresh")
         self.top_grid = QGridLayout(top_group)
-        self.top_grid.setHorizontalSpacing(10)
-        self.top_grid.setVerticalSpacing(8)
+        self.top_grid.setHorizontalSpacing(8)
+        self.top_grid.setVerticalSpacing(4)
         self.top_grid.setColumnStretch(1, 1)
 
         self.preset_combo = NoWheelComboBox()
@@ -1362,7 +1480,6 @@ class DTDEditorDialog(QDialog):
         self.refresh_sb.setSingleStep(1.0)
         self.refresh_sb.setSuffix(" Hz")
         self.refresh_sb.setMinimumWidth(0)
-        self.refresh_sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.refresh_sb.setValue(float(initial_data.get("vrefresh", 85.0)))
         self._saved_refresh_hz = self.refresh_sb.value()
         self._was_native = ("Native" in initial_preset)
@@ -1380,10 +1497,11 @@ class DTDEditorDialog(QDialog):
 
         param_group = QGroupBox("Timing Parameters (Horizontal && Vertical)")
         pgrid = QGridLayout(param_group)
-        pgrid.setHorizontalSpacing(8)
-        pgrid.setVerticalSpacing(6)
-        pgrid.setColumnStretch(1, 1)
-        pgrid.setColumnStretch(2, 1)
+        pgrid.setHorizontalSpacing(6)
+        pgrid.setVerticalSpacing(3)
+        pgrid.setColumnStretch(1, 0)
+        pgrid.setColumnStretch(2, 0)
+        pgrid.setColumnStretch(3, 1)
 
         hdr_font = QFont()
         hdr_font.setBold(True)
@@ -1400,7 +1518,6 @@ class DTDEditorDialog(QDialog):
             sb.setSingleStep(step)
             sb.setSuffix(" px")
             sb.setMinimumWidth(0)
-            sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             sb.setValue(max(lo, min(hi, int(val))))
             return sb
 
@@ -1411,7 +1528,6 @@ class DTDEditorDialog(QDialog):
             sb.setSingleStep(float(step))
             sb.setSuffix(" lines")
             sb.setMinimumWidth(0)
-            sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             sb.setValue(max(float(lo), min(float(hi), float(val))))
             return sb
 
@@ -1434,7 +1550,6 @@ class DTDEditorDialog(QDialog):
         self.vactive_sb.setSingleStep(2 if initial_data.get("interlaced") else 1)
         self.vactive_sb.setSuffix(" lines")
         self.vactive_sb.setMinimumWidth(0)
-        self.vactive_sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.vactive_sb.setValue(max(64, min(4095, vact)))
 
         self.hfront_sb = make_h_sb(1, 1023, hfr, 1)
@@ -1447,6 +1562,15 @@ class DTDEditorDialog(QDialog):
         self.vblank_sb = make_v_sb(2.0, 4095.5, vblk_dec, 0.5)
         self.htotal_sb = make_h_sb(66, 8190, hact + hblk, 1)
         self.vtotal_sb = make_v_sb(66.0, 8190.5, vtot_dec, 0.5)
+        for sb in (self.hactive_sb, self.hfront_sb, self.hsync_sb, self.hback_sb, self.hblank_sb, self.htotal_sb):
+            sb.setRange(-16380, 16380)
+        for sb in (self.vfront_sb, self.vsync_sb, self.vback_sb, self.vblank_sb, self.vtotal_sb):
+            sb.setRange(-16380.0, 16380.0)
+        self.vactive_sb.setRange(-16380, 16380)
+        self._timing_boxes = (
+            self.hactive_sb, self.vactive_sb, self.hfront_sb, self.vfront_sb, self.hsync_sb, self.vsync_sb,
+            self.hback_sb, self.vback_sb, self.hblank_sb, self.vblank_sb, self.htotal_sb, self.vtotal_sb,
+        )
 
         self.rb_anchor_back = QRadioButton("Back Porch:")
         self.rb_anchor_blank = QRadioButton("Blanking:")
@@ -1490,8 +1614,8 @@ class DTDEditorDialog(QDialog):
 
         freq_group = QGroupBox("Frequency && Pixel Clock (Decimal Precision)")
         self.fgrid = QGridLayout(freq_group)
-        self.fgrid.setHorizontalSpacing(10)
-        self.fgrid.setVerticalSpacing(6)
+        self.fgrid.setHorizontalSpacing(8)
+        self.fgrid.setVerticalSpacing(3)
         self.fgrid.setColumnStretch(1, 1)
 
         self.rb_rate_v = QRadioButton("Refresh Rate:")
@@ -1514,7 +1638,6 @@ class DTDEditorDialog(QDialog):
         self.hscan_sb.setSingleStep(0.1)
         self.hscan_sb.setSuffix(" kHz")
         self.hscan_sb.setMinimumWidth(0)
-        self.hscan_sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         htot_init = max(1, int(initial_data["hactive"]) + int(initial_data["hblank"]))
         hscan_init = float(initial_data.get("hscan_khz", (float(initial_data["pclk_mhz"]) * 1000.0) / htot_init))
         self.hscan_sb.setValue(max(5.0, min(500.0, hscan_init)))
@@ -1525,7 +1648,6 @@ class DTDEditorDialog(QDialog):
         self.pclk_sb.setSingleStep(0.01)
         self.pclk_sb.setSuffix(" MHz")
         self.pclk_sb.setMinimumWidth(0)
-        self.pclk_sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.pclk_sb.setValue(float(initial_data["pclk_mhz"]))
         layout.addWidget(freq_group)
 
@@ -1540,8 +1662,8 @@ class DTDEditorDialog(QDialog):
         btn_bar = QFrame()
         btn_bar.setObjectName("dialogBtnBar")
         btn_layout = QHBoxLayout(btn_bar)
-        btn_layout.setContentsMargins(14, 10, 14, 10)
-        btn_layout.setSpacing(8)
+        btn_layout.setContentsMargins(8, 6, 8, 6)
+        btn_layout.setSpacing(6)
 
         self.ok_btn = QPushButton("✓ Save Resolution")
         self.ok_btn.setObjectName("primaryBtn")
@@ -1568,12 +1690,31 @@ class DTDEditorDialog(QDialog):
         self.hsync_pos_cb.toggled.connect(self.update_live_stats)
         self.vsync_pos_cb.toggled.connect(self.update_live_stats)
 
+        self._content = content
+        self._scroll = scroll
         self.on_mode_changed()
         self._reflow_dialog_layout()
+        self._fit_minimum_width()
+
+    def _fit_minimum_width(self):
+        """The dialog is never narrower than its content needs: nothing is clipped at the right edge."""
+        self._content.layout().activate()
+        need = self._content.minimumSizeHint().width() + self._scroll.verticalScrollBar().sizeHint().width() + 4
+        self.setMinimumWidth(max(need, 300))
+        if self.width() < self.minimumWidth():
+            self.resize(self.minimumWidth(), self.height())
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fit_minimum_width()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._reflow_dialog_layout()
+        # The reflow changes the layout's real height (compact mode stacks rows). Lay out again right now, in the
+        # same event, so the first frame at the new size is already tall enough instead of squashing the rows.
+        self._content.layout().invalidate()
+        self._content.layout().activate()
 
     def _reflow_dialog_layout(self):
         if not hasattr(self, "top_grid") or not hasattr(self, "fgrid"):
@@ -1729,10 +1870,6 @@ class DTDEditorDialog(QDialog):
         if self.preset_combo.currentText() != "Manual":
             self.on_active_or_target_changed()
             return
-        self._updating = True
-        if il and self.vactive_sb.value() % 2 != 0:
-            self.vactive_sb.setValue(self.vactive_sb.value() + 1)
-        self._updating = False
         self.update_live_stats()
 
     def on_refresh_changed(self):
@@ -1750,7 +1887,7 @@ class DTDEditorDialog(QDialog):
         if "Native" not in preset:
             self._saved_refresh_hz = self.refresh_sb.value()
         self._updating = True
-        if self.interlaced_cb.isChecked() and self.vactive_sb.value() % 2 != 0:
+        if preset != "Manual" and self.interlaced_cb.isChecked() and self.vactive_sb.value() % 2 != 0:
             self.vactive_sb.setValue(self.vactive_sb.value() + 1)
         if preset != "Manual":
             res = calculate_timings(
@@ -1804,7 +1941,6 @@ class DTDEditorDialog(QDialog):
             blank = self.hblank_sb.value()
         else:
             blank = self.htotal_sb.value() - act
-        blank = max(fr + sy + 1, min(4095, blank))
         self.hblank_sb.setValue(blank)
         self.hback_sb.setValue(blank - fr - sy)
         self.htotal_sb.setValue(act + blank)
@@ -1821,7 +1957,7 @@ class DTDEditorDialog(QDialog):
             blank = self.vblank_sb.value()
         else:
             blank = self.vtotal_sb.value() - act
-        blank = round(max(fr + sy + 0.5, min(4095.5, blank)), 1)
+        blank = round(blank, 1)
         self.vblank_sb.setValue(blank)
         self.vback_sb.setValue(round(blank - fr - sy, 1))
         self.vtotal_sb.setValue(round(act + blank, 1))
@@ -1863,14 +1999,53 @@ class DTDEditorDialog(QDialog):
         self._commit_pending_edits()
         super().accept()
 
+    def _timing_violations(self):
+        """(boxes, message) for every value an EDID detailed timing cannot hold. Nothing is changed."""
+        found = []
+        il = self.interlaced_cb.isChecked()
+        hv = (
+            (self.hback_sb, self.hblank_sb, self.htotal_sb), (self.vback_sb, self.vblank_sb, self.vtotal_sb),
+        )
+
+        def check(box, low, high, name, unit, group=None):
+            value = box.value()
+            if value < low or value > high:
+                lo, hi = (f"{low:g}", f"{high:g}")
+                boxes = (box,) if group is None else (box, group[self._last_hv_anchor])
+                found.append((boxes, f"{name} {value:g} {unit} (allowed {lo}-{hi})"))
+
+        check(self.hactive_sb, 64, 4095, "HActive", "px")
+        check(self.vactive_sb, 64, 4095, "VActive", "lines")
+        if il and self.vactive_sb.value() % 2:
+            found.append(((self.vactive_sb,), "VActive must be even when interlaced"))
+        check(self.hfront_sb, 1, 1023, "HFront", "px")
+        check(self.hsync_sb, 1, 1023, "HSync", "px")
+        check(self.hback_sb, 1, 4095, "HBack", "px", hv[0])
+        check(self.hblank_sb, 2, 4095, "HBlank", "px", hv[0])
+        check(self.vfront_sb, 1, 63.5, "VFront", "lines")
+        check(self.vsync_sb, 1, 63.5, "VSync", "lines")
+        check(self.vback_sb, 0.5, 4095.5, "VBack", "lines", hv[1])
+        check(self.vblank_sb, 2, 4095.5, "VBlank", "lines", hv[1])
+        return found
+
+    def _apply_validity(self):
+        """Mark every offending box red and enable Save only when all values fit. Returns the messages."""
+        found = self._timing_violations()
+        red = {id(box) for boxes, _ in found for box in boxes}
+        for box in self._timing_boxes:
+            want = id(box) in red
+            if bool(box.property("invalid")) != want:
+                box.setProperty("invalid", want)
+                box.style().unpolish(box)
+                box.style().polish(box)
+        self.ok_btn.setEnabled(not found)
+        return [message for _, message in found]
+
     def update_live_stats(self):
         if self._updating:
             return
         hact = int(self.hactive_sb.value())
-        hfr = int(self.hfront_sb.value())
-        hsy = int(self.hsync_sb.value())
         hblk = int(self.hblank_sb.value())
-        hbck = hblk - hfr - hsy
         htotal = hact + hblk
 
         vact = int(self.vactive_sb.value())
@@ -1910,13 +2085,15 @@ class DTDEditorDialog(QDialog):
         warnings = []
         if htotal > 4095:
             warnings.append("HTotal > 4095!")
-        if hbck < 1 or vbck_d < 0.5:
-            warnings.append("Back Porch <= 0!")
         if hscan_khz > 140.0:
             warnings.append(">140 kHz H-Scan")
         if pclk > 700.0:
             warnings.append(">700 MHz Clock!")
-        status_str = " | ".join(warnings) if warnings else f"Valid ({enc_str})"
+        problems = self._apply_validity()
+        if problems:
+            status_str = "CANNOT SAVE: " + " | ".join(problems)
+        else:
+            status_str = " | ".join(warnings) if warnings else f"Valid ({enc_str})"
 
         self.stats_label.setText(
             f"Actual Refresh: {scan_str}\n"
@@ -2065,7 +2242,7 @@ class LinuxCRUWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Linux CRU — Custom Resolution Utility")
-        self.resize(740, 660)
+        self.resize(680, 600)
         self.setMinimumSize(380, 420)
         os.makedirs(DOCS_PROFILES_DIR, exist_ok=True)
         os.makedirs(LEGACY_PROFILES_DIR, exist_ok=True)
@@ -2093,8 +2270,8 @@ class LinuxCRUWindow(QMainWindow):
         central.setObjectName("scrollContent")
         scroll.setWidget(central)
         layout = QVBoxLayout(central)
-        layout.setContentsMargins(16, 14, 16, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(10, 8, 10, 10)
+        layout.setSpacing(6)
 
         # Header Row (Title + Zoom button only — no subtitle description)
         hdr_row = QHBoxLayout()
@@ -2112,8 +2289,8 @@ class LinuxCRUWindow(QMainWindow):
         self.banner_card = QFrame()
         self.banner_card.setObjectName("bannerCard")
         banner_layout = QHBoxLayout(self.banner_card)
-        banner_layout.setContentsMargins(14, 10, 14, 10)
-        banner_layout.setSpacing(10)
+        banner_layout.setContentsMargins(10, 6, 10, 6)
+        banner_layout.setSpacing(8)
         self.path_label = AutoWrapLabel("Source: New Blank Profile")
         self.path_label.setObjectName("bannerLabel")
         self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -2128,11 +2305,11 @@ class LinuxCRUWindow(QMainWindow):
         # Top Port & Profile Selector
         top_group = QGroupBox("1. Video Port && EDID Profile")
         top_vbox = QVBoxLayout(top_group)
-        top_vbox.setSpacing(10)
+        top_vbox.setSpacing(6)
 
         sel_grid = QGridLayout()
-        sel_grid.setHorizontalSpacing(10)
-        sel_grid.setVerticalSpacing(8)
+        sel_grid.setHorizontalSpacing(8)
+        sel_grid.setVerticalSpacing(4)
         self.port_combo = NoWheelComboBox()
         self._populate_port_combo()
         self.port_combo.currentIndexChanged.connect(self.on_port_changed)
@@ -2150,7 +2327,7 @@ class LinuxCRUWindow(QMainWindow):
         top_vbox.addLayout(sel_grid)
 
         self.top_btn_grid = QGridLayout()
-        self.top_btn_grid.setSpacing(8)
+        self.top_btn_grid.setSpacing(5)
         self.drm_btn = QPushButton("⬇ Pull Port EDID")
         self.drm_btn.setToolTip("Reads the live EDID from the currently selected video port.")
         self.drm_btn.clicked.connect(self.read_drm_edid)
@@ -2171,7 +2348,7 @@ class LinuxCRUWindow(QMainWindow):
         # Detailed Resolutions Group (4 Slots)
         dtd_group = QGroupBox("2. Detailed Resolutions (4 Slots — Double-Click to Edit)")
         dtd_layout = QVBoxLayout(dtd_group)
-        dtd_layout.setSpacing(8)
+        dtd_layout.setSpacing(5)
         self.table = QTableWidget(4, 6)
         self.table.setHorizontalHeaderLabels([
             "Slot", "Resolution", "Refresh Rate", "H-Scan", "Pixel Clock", "Timing / Sync"
@@ -2184,12 +2361,11 @@ class LinuxCRUWindow(QMainWindow):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setMinimumHeight(148)
         self.table.doubleClicked.connect(self.edit_selected_dtd)
         dtd_layout.addWidget(self.table)
 
         self.dtd_btn_grid = QGridLayout()
-        self.dtd_btn_grid.setSpacing(8)
+        self.dtd_btn_grid.setSpacing(5)
         self.edit_dtd_btn = QPushButton("✎ Add / Edit Detailed Resolution...")
         self.edit_dtd_btn.setObjectName("primaryBtn")
         self.edit_dtd_btn.clicked.connect(self.edit_selected_dtd)
@@ -2206,14 +2382,14 @@ class LinuxCRUWindow(QMainWindow):
         # Standard Resolutions Group (8 Slots)
         std_group = QGroupBox("3. Standard Resolutions (8 Slots)")
         self.std_box_layout = QVBoxLayout(std_group)
-        self.std_box_layout.setSpacing(8)
+        self.std_box_layout.setSpacing(5)
         self.std_list = QListWidget()
-        self.std_list.setMinimumHeight(96)
+        self.std_list.setMinimumHeight(70)
         self.std_list.doubleClicked.connect(self.edit_std_res)
         self.std_box_layout.addWidget(self.std_list)
 
         self.std_btn_grid = QGridLayout()
-        self.std_btn_grid.setSpacing(8)
+        self.std_btn_grid.setSpacing(5)
         self.add_std_btn = QPushButton("➕ Add...")
         self.add_std_btn.clicked.connect(self.add_std_res)
         self.edit_std_btn = QPushButton("✎ Edit...")
@@ -2232,8 +2408,8 @@ class LinuxCRUWindow(QMainWindow):
         bot_card = QFrame()
         bot_card.setObjectName("actionCard")
         self.bot_btn_grid = QGridLayout(bot_card)
-        self.bot_btn_grid.setContentsMargins(12, 10, 12, 10)
-        self.bot_btn_grid.setSpacing(8)
+        self.bot_btn_grid.setContentsMargins(8, 6, 8, 6)
+        self.bot_btn_grid.setSpacing(5)
         self.export_btn = QPushButton("📤 Export .bin...")
         self.export_btn.clicked.connect(self.save_bin_as)
         self.live_btn = QPushButton("⚡ Apply Live (No Reboot)")
@@ -2386,90 +2562,17 @@ class LinuxCRUWindow(QMainWindow):
         if hasattr(self, "zoom_btn"):
             self.zoom_btn.setText(f"🔍 {round(self.ui_scale * 100)}%")
 
-        base_pt = round(10.0 * self.ui_scale, 1)
-        small_pt = round(9.0 * self.ui_scale, 1)
-        title_pt = round(14.5 * self.ui_scale, 1)
-        grp_pt = round(10.8 * self.ui_scale, 1)
-        row_h = max(26, round(31 * self.ui_scale))
+        row_h = max(22, round(25 * self.ui_scale))
 
         for r in range(4):
             self.table.setRowHeight(r, row_h)
-        self.table.setMinimumHeight(max(136, round(row_h * 4 + 34 * self.ui_scale)))
+        header_h = self.table.horizontalHeader().sizeHint().height()
+        self.table.setFixedHeight(header_h + row_h * 4 + 4)
+        # The standard list holds at most 8 entries: size it to them instead of leaving a blank block.
+        std_row_h = self.std_list.fontMetrics().height() + 6
+        self.std_list.setMaximumHeight(std_row_h * 8 + 8)
 
-        QApplication.instance().setStyleSheet(f"""
-            QMainWindow, QDialog, QWidget#scrollContent, QWidget#dialogContent {{
-                background-color: #16181d; color: #e6edf3; font-size: {base_pt}pt;
-            }}
-            QScrollArea {{ border: none; background-color: #16181d; }}
-            QLabel, QRadioButton, QCheckBox {{ color: #e6edf3; font-size: {base_pt}pt; }}
-            QLabel#mainTitle {{ font-size: {title_pt}pt; font-weight: bold; color: #ffffff; }}
-            QLabel#mainSubtitle {{ font-size: {small_pt}pt; color: #9da7b3; }}
-            QLabel#bannerLabel {{ font-size: {base_pt}pt; font-weight: 600; color: #f0f6fc; }}
-            QLabel#summaryMono {{
-                background-color: #12161c; color: #e6edf3; padding: 8px 10px;
-                border: 1px solid #30363d; border-radius: 6px;
-                font-family: monospace; font-size: {small_pt}pt;
-            }}
-            QFrame#bannerCard {{
-                background-color: #192332; border: 1px solid #315a8a; border-radius: 10px;
-            }}
-            QFrame#actionCard, QFrame#dialogBtnBar {{
-                background-color: #1c2129; border: 1px solid #353e4d; border-radius: 10px;
-            }}
-            QLabel#badgeOk {{
-                background-color: #153726; color: #56d364; border: 1px solid #2ea043;
-                border-radius: 5px; padding: 3px 9px; font-size: {small_pt}pt; font-weight: bold;
-            }}
-            QLabel#badgeWarn {{
-                background-color: #3a2d13; color: #e3b341; border: 1px solid #9e6a03;
-                border-radius: 5px; padding: 3px 9px; font-size: {small_pt}pt; font-weight: bold;
-            }}
-            QGroupBox {{
-                background-color: #1c2028; border: 1px solid #343c4a; border-radius: 10px;
-                margin-top: 12px; padding: 12px 10px 10px 10px;
-                font-size: {grp_pt}pt; font-weight: bold; color: #f0f6fc;
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: margin; subcontrol-position: top left;
-                left: 12px; padding: 0 6px; color: #79c0ff;
-            }}
-            QComboBox, QSpinBox, QDoubleSpinBox {{
-                background-color: #252b35; color: #f0f6fc; border: 1px solid #414a58;
-                border-radius: 6px; padding: 5px 8px; min-height: 22px; font-size: {base_pt}pt;
-            }}
-            QComboBox QAbstractItemView {{
-                background-color: #1c2129; color: #f0f6fc; border: 1px solid #414a58;
-                selection-background-color: #1f6feb; selection-color: #ffffff;
-                padding: 4px; font-size: {base_pt}pt;
-            }}
-            QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {{
-                background-color: #1a1e25; color: #768390; border: 1px solid #2d333b;
-                font-size: {base_pt}pt;
-            }}
-            QTableWidget, QListWidget {{
-                background-color: #14181f; color: #e6edf3; border: 1px solid #343c4a;
-                border-radius: 6px; gridline-color: #282f3a; font-size: {base_pt}pt;
-            }}
-            QHeaderView::section {{
-                background-color: #222731; color: #c9d1d9; border: none;
-                border-bottom: 1px solid #384150; border-right: 1px solid #2d3440;
-                padding: 5px 6px; font-size: {small_pt}pt; font-weight: bold;
-            }}
-            QPushButton {{
-                background-color: #2b323d; color: #f0f6fc; border: 1px solid #485263;
-                border-radius: 6px; padding: 6px 12px; font-size: {base_pt}pt; font-weight: 600;
-            }}
-            QPushButton:hover:enabled {{ background-color: #363f4e; border-color: #637085; }}
-            QPushButton:disabled {{ background-color: #1c2027; color: #6e7681; border: 1px solid #2d333d; }}
-            QPushButton#primaryBtn {{
-                background-color: #1f6feb; color: #ffffff; border: 1px solid #388bfd;
-            }}
-            QPushButton#primaryBtn:hover:enabled {{ background-color: #2a7aef; }}
-            QPushButton#accentBtn {{
-                background-color: #1b4b36; color: #7ee787; border: 1px solid #2ea043;
-            }}
-            QPushButton#accentBtn:hover:enabled {{ background-color: #235d43; }}
-        """)
+        QApplication.instance().setStyleSheet(app_stylesheet(self.ui_scale))
         self._reflow_responsive()
 
 
@@ -2508,6 +2611,16 @@ class LinuxCRUWindow(QMainWindow):
         self._reflow_grid_buttons(self.dtd_btn_grid, self.dtd_buttons, dtd_cols)
         self._reflow_grid_buttons(self.std_btn_grid, self.std_buttons, std_cols)
         self._reflow_grid_buttons(self.bot_btn_grid, self.bot_buttons, bot_cols)
+        # Re-place everything now: left for the next event-loop turn, the buttons would sit on stale positions
+        # (over the table) for one painted frame while the window is being dragged narrower.
+        for grid in (self.top_btn_grid, self.dtd_btn_grid, self.std_btn_grid, self.bot_btn_grid):
+            grid.invalidate()
+        content = self.centralWidget().widget() if self.centralWidget() is not None else None
+        if content is not None and content.layout() is not None:
+            for group in content.findChildren(QGroupBox):
+                if group.layout() is not None:
+                    group.layout().activate()
+            content.layout().activate()
 
         align = Qt.AlignmentFlag.AlignCenter if narrow else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.title_lbl.setAlignment(align)
@@ -2566,21 +2679,24 @@ class LinuxCRUWindow(QMainWindow):
                 sync_str = f"{preset} [{pol}]"
                 is_empty = False
             elif d["type"] == "range_limits":
-                res_str = "Monitor Range Limits"
-                rate_str = f"{d['v_min']}-{d['v_max']} Hz"
-                hscan_str = f"{d['h_min']}-{d['h_max']} kHz"
-                clk_str = f"max {d['max_pclk']} MHz"
-                sync_str = "Range Limits"
+                res_str = (
+                    f"Range Limits: {d['v_min']}–{d['v_max']} Hz, {d['h_min']}–{d['h_max']} kHz, "
+                    f"up to {d['max_pclk']} MHz"
+                )
+                rate_str = hscan_str = clk_str = sync_str = ""
                 is_empty = True
             elif d["type"] == "monitor_name":
                 res_str = f"Monitor Name: {d['name']}"
-                rate_str = hscan_str = clk_str = "-"
-                sync_str = "Name"
+                rate_str = hscan_str = clk_str = sync_str = ""
                 is_empty = True
             else:
-                res_str, rate_str, hscan_str, clk_str, sync_str = "(Empty)", "-", "-", "-", "-"
+                res_str = "(Empty)"
+                rate_str = hscan_str = clk_str = sync_str = ""
                 is_empty = True
 
+            # A row that is not a timing has nothing for the other columns: its text spans the whole row
+            # instead of leaving a line of empty boxes.
+            self.table.setSpan(idx, 1, 1, 1 if d["type"] == "dtd" else 5)
             for c_idx, text in enumerate([slot_lbl, res_str, rate_str, hscan_str, clk_str, sync_str]):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)

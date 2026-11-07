@@ -6,41 +6,7 @@ radio is the input and the other two fields of its group are calculated (and gre
 
 import pytest
 
-
-@pytest.fixture
-def make_dialog(cru, app):
-    made = []
-
-    def make(width=1600, height=1200, hz=85.0, interlaced=False, preset="Manual"):
-        base = cru.calculate_timings("CVT Standard", width, height, hz, interlaced)
-        dlg = cru.DTDEditorDialog(None, base)
-        dlg.preset_combo.setCurrentText(preset)
-        dlg.show()
-        app.processEvents()
-        made.append(dlg)
-        return dlg
-
-    yield make
-    for dlg in made:
-        dlg.close()
-
-
-def type_into(app, widget, text, then_tab=True):
-    from PyQt6.QtCore import Qt
-    from PyQt6.QtTest import QTest
-
-    widget.setFocus()
-    widget.selectAll()
-    app.processEvents()
-    QTest.keyClicks(widget, text)
-    if then_tab:
-        QTest.keyClick(widget, Qt.Key.Key_Tab)
-    app.processEvents()
-
-
-def click_radio(app, radio):
-    radio.click()
-    app.processEvents()
+from gui_fixtures import click_radio, type_into
 
 
 def test_typing_a_multi_digit_total_is_not_clamped_mid_keystroke(app, make_dialog):

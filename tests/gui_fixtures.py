@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from PyQt6.QtCore import QEvent
 
 from conftest import make_paths, materialize_fixture
 from interlace_sysinfo import collect_system_info
@@ -47,6 +48,52 @@ def app(cru):
     from PyQt6.QtWidgets import QApplication
 
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture
+def make_dialog(cru, app):
+    """Factory for the Detailed Resolution dialog (Manual mode by default); every dialog is closed afterwards."""
+    made = []
+
+    def make(width=1600, height=1200, hz=85.0, interlaced=False, preset="Manual", parent=None):
+        base = cru.calculate_timings("CVT Standard", width, height, hz, interlaced)
+        dlg = cru.DTDEditorDialog(parent, base)
+        dlg.preset_combo.setCurrentText(preset)
+        dlg.show()
+        app.processEvents()
+        made.append(dlg)
+        return dlg
+
+    yield make
+    for dlg in made:
+        discard(app, dlg)
+
+
+def discard(app, widget):
+    """Close a top-level widget and really delete it, so a later global restyle never walks a dead one."""
+    widget.close()
+    widget.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+
+
+def type_into(app, widget, text, then_tab=True):
+    """Type ``text`` into a spin box with real key events, then Tab away (commit) unless ``then_tab`` is False."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+
+    widget.setFocus()
+    widget.selectAll()
+    app.processEvents()
+    QTest.keyClicks(widget, text)
+    if then_tab:
+        QTest.keyClick(widget, Qt.Key.Key_Tab)
+    app.processEvents()
+
+
+def click_radio(app, radio):
+    radio.click()
+    app.processEvents()
 
 
 def make_window(gui_module, pc, tmp_path, monkeypatch):
