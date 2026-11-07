@@ -26,7 +26,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, Qt, QTimer
+from PyQt6.QtCore import QEvent, QSize, Qt, QTimer
 from PyQt6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -43,6 +43,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -1139,11 +1140,11 @@ def app_stylesheet(scale: float) -> str:
             }}
             QComboBox {{
                 background-color: #252b35; color: #f0f6fc; border: 1px solid #414a58;
-                border-radius: 3px; padding: 3px 6px; font-size: {base_pt}pt;
+                border-radius: 3px; padding: 2px 6px; font-size: {base_pt}pt;
             }}
             QSpinBox, QDoubleSpinBox {{
                 background-color: #252b35; color: #f0f6fc; border: 1px solid #414a58;
-                border-radius: 0px; padding: 2px 4px; font-size: {base_pt}pt;
+                border-radius: 0px; padding: 1px 4px; font-size: {base_pt}pt;
             }}
             QComboBox QAbstractItemView {{
                 background-color: #1c2129; color: #f0f6fc; border: 1px solid #414a58;
@@ -1453,7 +1454,7 @@ class DTDEditorDialog(QDialog):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        top_group = QGroupBox("Timing Standard && Target Refresh")
+        top_group = QGroupBox("Timing Standard")
         self.top_grid = QGridLayout(top_group)
         self.top_grid.setHorizontalSpacing(8)
         self.top_grid.setVerticalSpacing(4)
@@ -1492,7 +1493,6 @@ class DTDEditorDialog(QDialog):
         )
 
         self.lbl_timing = QLabel("<b>Timing:</b>")
-        self.lbl_target_ref = QLabel("<b>Target Refresh:</b>")
         layout.addWidget(top_group)
 
         param_group = QGroupBox("Timing Parameters (Horizontal && Vertical)")
@@ -1571,6 +1571,8 @@ class DTDEditorDialog(QDialog):
             self.hactive_sb, self.vactive_sb, self.hfront_sb, self.vfront_sb, self.hsync_sb, self.vsync_sb,
             self.hback_sb, self.vback_sb, self.hblank_sb, self.vblank_sb, self.htotal_sb, self.vtotal_sb,
         )
+        for sb in self._timing_boxes:  # same width per column, so the right edges line up row to row
+            sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         self.rb_anchor_back = QRadioButton("Back Porch:")
         self.rb_anchor_blank = QRadioButton("Blanking:")
@@ -1616,7 +1618,6 @@ class DTDEditorDialog(QDialog):
         self.fgrid = QGridLayout(freq_group)
         self.fgrid.setHorizontalSpacing(8)
         self.fgrid.setVerticalSpacing(3)
-        self.fgrid.setColumnStretch(1, 1)
 
         self.rb_rate_v = QRadioButton("Refresh Rate:")
         self.rb_rate_h = QRadioButton("H-Scan Rate:")
@@ -1649,6 +1650,21 @@ class DTDEditorDialog(QDialog):
         self.pclk_sb.setSuffix(" MHz")
         self.pclk_sb.setMinimumWidth(0)
         self.pclk_sb.setValue(float(initial_data["pclk_mhz"]))
+        for row, (radio, box, actual) in enumerate((
+            (self.rb_rate_v, self.refresh_sb, self.actual_vrate_lbl),
+            (self.rb_rate_h, self.hscan_sb, self.actual_hrate_lbl),
+            (self.rb_rate_pclk, self.pclk_sb, self.actual_pclk_lbl),
+        )):
+            # Expanding inside a column that does not stretch: all three boxes get the width of the widest one,
+            # so their edges line up and every 'Actual' label starts at the same x.
+            box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            actual.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.fgrid.addWidget(radio, row, 0)
+            self.fgrid.addWidget(box, row, 1)
+            self.fgrid.addWidget(actual, row, 2)
+        self.fgrid.setColumnStretch(0, 0)
+        self.fgrid.setColumnStretch(1, 0)
+        self.fgrid.setColumnStretch(2, 1)
         layout.addWidget(freq_group)
 
         calc_group = QGroupBox("Live Timing Summary && ToastyX Interlace Breakdown")
@@ -1717,58 +1733,24 @@ class DTDEditorDialog(QDialog):
         self._content.layout().activate()
 
     def _reflow_dialog_layout(self):
-        if not hasattr(self, "top_grid") or not hasattr(self, "fgrid"):
+        if not hasattr(self, "top_grid"):
             return
         compact = self.width() < 560
         if compact == self._resp_compact:
             return
         self._resp_compact = compact
-
         while self.top_grid.count():
             self.top_grid.takeAt(0)
+        self.top_grid.addWidget(self.lbl_timing, 0, 0)
+        self.top_grid.addWidget(self.preset_combo, 0, 1)
         if compact:
-            self.top_grid.addWidget(self.lbl_timing, 0, 0)
-            self.top_grid.addWidget(self.preset_combo, 0, 1)
             self.top_grid.addWidget(self.switch_manual_btn, 1, 0, 1, 2)
-            self.top_grid.addWidget(self.lbl_target_ref, 2, 0)
-            self.top_grid.addWidget(self.refresh_sb, 2, 1)
-            self.top_grid.addWidget(self.interlaced_cb, 3, 0, 1, 2)
-            self.top_grid.setColumnStretch(1, 1)
-            self.top_grid.setColumnStretch(2, 0)
+            self.top_grid.addWidget(self.interlaced_cb, 2, 0, 1, 2)
         else:
-            self.top_grid.addWidget(self.lbl_timing, 0, 0)
-            self.top_grid.addWidget(self.preset_combo, 0, 1)
             self.top_grid.addWidget(self.switch_manual_btn, 0, 2)
-            self.top_grid.addWidget(self.lbl_target_ref, 1, 0)
-            self.top_grid.addWidget(self.refresh_sb, 1, 1)
-            self.top_grid.addWidget(self.interlaced_cb, 1, 2)
-            self.top_grid.setColumnStretch(1, 1)
-            self.top_grid.setColumnStretch(2, 0)
-
-        while self.fgrid.count():
-            self.fgrid.takeAt(0)
-        if compact:
-            self.fgrid.addWidget(self.rb_rate_v, 0, 0)
-            self.fgrid.addWidget(self.actual_vrate_lbl, 0, 1)
-            self.fgrid.addWidget(self.rb_rate_h, 1, 0)
-            self.fgrid.addWidget(self.hscan_sb, 1, 1)
-            self.fgrid.addWidget(self.actual_hrate_lbl, 2, 1)
-            self.fgrid.addWidget(self.rb_rate_pclk, 3, 0)
-            self.fgrid.addWidget(self.pclk_sb, 3, 1)
-            self.fgrid.addWidget(self.actual_pclk_lbl, 4, 1)
-            self.fgrid.setColumnStretch(1, 1)
-            self.fgrid.setColumnStretch(2, 0)
-        else:
-            self.fgrid.addWidget(self.rb_rate_v, 0, 0)
-            self.fgrid.addWidget(self.actual_vrate_lbl, 0, 1, 1, 2)
-            self.fgrid.addWidget(self.rb_rate_h, 1, 0)
-            self.fgrid.addWidget(self.hscan_sb, 1, 1)
-            self.fgrid.addWidget(self.actual_hrate_lbl, 1, 2)
-            self.fgrid.addWidget(self.rb_rate_pclk, 2, 0)
-            self.fgrid.addWidget(self.pclk_sb, 2, 1)
-            self.fgrid.addWidget(self.actual_pclk_lbl, 2, 2)
-            self.fgrid.setColumnStretch(1, 1)
-            self.fgrid.setColumnStretch(2, 0)
+            self.top_grid.addWidget(self.interlaced_cb, 1, 1, 1, 2)
+        self.top_grid.setColumnStretch(1, 1)
+        self.top_grid.setColumnStretch(2, 0)
 
     def _on_hv_anchor_changed(self, btn_id: int, checked: bool):
         if checked:
@@ -1813,7 +1795,7 @@ class DTDEditorDialog(QDialog):
                 w.setEnabled(is_manual and index == self._last_hv_anchor)
         self.hscan_sb.setEnabled(is_manual and self._last_rate_anchor == 1)
         self.pclk_sb.setEnabled(is_manual and self._last_rate_anchor == 2)
-        self.refresh_sb.setEnabled(not is_native and (not is_manual or self._last_rate_anchor == 0))
+        self.refresh_sb.setEnabled(not is_native)
 
     def _sync_rates_in_manual(self):
         htotal = max(1, int(self.hactive_sb.value() + self.hblank_sb.value()))
@@ -1876,6 +1858,8 @@ class DTDEditorDialog(QDialog):
         if self._updating:
             return
         if self.preset_combo.currentText() == "Manual":
+            # Typing a refresh rate makes it the input: Refresh is selected, pixel clock and H-scan follow it.
+            self.rb_rate_v.setChecked(True)
             self._on_rate_input_changed()
         else:
             self.on_active_or_target_changed()
@@ -2361,6 +2345,8 @@ class LinuxCRUWindow(QMainWindow):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.table.doubleClicked.connect(self.edit_selected_dtd)
         dtd_layout.addWidget(self.table)
 
@@ -2384,7 +2370,13 @@ class LinuxCRUWindow(QMainWindow):
         self.std_box_layout = QVBoxLayout(std_group)
         self.std_box_layout.setSpacing(5)
         self.std_list = QListWidget()
-        self.std_list.setMinimumHeight(70)
+        self.std_list.setFlow(QListView.Flow.TopToBottom)
+        self.std_list.setWrapping(True)
+        self.std_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.std_list.setUniformItemSizes(True)
+        self.std_list.setSpacing(0)
+        self.std_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.std_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.std_list.doubleClicked.connect(self.edit_std_res)
         self.std_box_layout.addWidget(self.std_list)
 
@@ -2564,21 +2556,58 @@ class LinuxCRUWindow(QMainWindow):
 
         row_h = max(22, round(25 * self.ui_scale))
 
+        QApplication.instance().setStyleSheet(app_stylesheet(self.ui_scale))
         for r in range(4):
             self.table.setRowHeight(r, row_h)
         header_h = self.table.horizontalHeader().sizeHint().height()
-        self.table.setFixedHeight(header_h + row_h * 4 + 4)
-        # The standard list holds at most 8 entries: size it to them instead of leaving a blank block.
-        std_row_h = self.std_list.fontMetrics().height() + 6
-        self.std_list.setMaximumHeight(std_row_h * 8 + 8)
-
-        QApplication.instance().setStyleSheet(app_stylesheet(self.ui_scale))
+        self.table.setFixedHeight(header_h + row_h * 4 + 2 * self.table.frameWidth())
+        self._fit_std_list()
         self._reflow_responsive()
 
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._reflow_responsive()
+        self._fit_std_list()
+        self._relayout_now()
+
+    def _relayout_now(self):
+        """Lay every group out again in this event until the geometry stops changing.
+
+        One pass is not enough: the standard list changes height, a scroll bar may appear, labels re-wrap and
+        the layout runs again. Left to later event-loop turns, buttons would sit over the table for a frame or
+        two while the window is dragged. The loop is bounded, so it can never spin.
+        """
+        scroll = self.centralWidget()
+        content = scroll.widget() if scroll is not None else None
+        if content is None or content.layout() is None:
+            return
+        probes = (self.table, self.std_list, *self.dtd_buttons, *self.std_buttons, *self.bot_buttons)
+
+        def signature():
+            return tuple(w.geometry().getRect() for w in probes)
+
+        def settle():
+            for grid in (self.top_btn_grid, self.dtd_btn_grid, self.std_btn_grid, self.bot_btn_grid):
+                grid.invalidate()
+            for group in content.findChildren(QGroupBox):
+                if group.layout() is not None:
+                    group.layout().invalidate()
+                    group.layout().activate()
+            content.layout().invalidate()
+            content.layout().activate()
+            QApplication.sendPostedEvents(content, QEvent.Type.LayoutRequest)
+            QApplication.sendPostedEvents(scroll, QEvent.Type.LayoutRequest)
+
+        previous = None
+        for _ in range(5):
+            settle()
+            scroll._fit_content_height()
+            self._fit_std_list()
+            current = signature()
+            if current == previous:
+                break
+            previous = current
 
     def _reflow_grid_buttons(self, grid: QGridLayout, buttons: list, cols: int):
         while grid.count():
@@ -2611,20 +2640,57 @@ class LinuxCRUWindow(QMainWindow):
         self._reflow_grid_buttons(self.dtd_btn_grid, self.dtd_buttons, dtd_cols)
         self._reflow_grid_buttons(self.std_btn_grid, self.std_buttons, std_cols)
         self._reflow_grid_buttons(self.bot_btn_grid, self.bot_buttons, bot_cols)
-        # Re-place everything now: left for the next event-loop turn, the buttons would sit on stale positions
-        # (over the table) for one painted frame while the window is being dragged narrower.
-        for grid in (self.top_btn_grid, self.dtd_btn_grid, self.std_btn_grid, self.bot_btn_grid):
-            grid.invalidate()
-        content = self.centralWidget().widget() if self.centralWidget() is not None else None
-        if content is not None and content.layout() is not None:
-            for group in content.findChildren(QGroupBox):
-                if group.layout() is not None:
-                    group.layout().activate()
-            content.layout().activate()
 
         align = Qt.AlignmentFlag.AlignCenter if narrow else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.title_lbl.setAlignment(align)
         self.path_label.setAlignment(align)
+
+    def _std_row_height(self) -> int:
+        return self.std_list.fontMetrics().height() + 6
+
+    def _std_column_width(self) -> int:
+        """Wide enough for the longest entry, so entries in different columns never touch."""
+        fm = self.std_list.fontMetrics()
+        longest = max(
+            (fm.horizontalAdvance(self.std_list.item(i).text()) for i in range(self.std_list.count())), default=0,
+        )
+        return longest + 24
+
+    def _fit_std_list(self):
+        """Show all (at most 8) standard resolutions without a scroll bar, using side space when height is short.
+
+        Entries fill top to bottom and continue in a new column to the right. With room to spare the list is one
+        column of every entry; as the window gets shorter the entries move into more columns (as many as fit the
+        width) until the page no longer needs a vertical scroll bar. The decision uses the room the window
+        really has, because Qt would otherwise always keep the list at its preferred height.
+        """
+        lst = self.std_list
+        if lst.count() == 0 or getattr(self, "_fitting_std", False):
+            return
+        self._fitting_std = True
+        try:
+            row_h = self._std_row_height()
+            col_w = self._std_column_width()
+            for i in range(lst.count()):
+                lst.item(i).setSizeHint(QSize(col_w, row_h))
+            frame = 2 * lst.frameWidth() + 2
+            usable = max(col_w, lst.width() - 2 * lst.frameWidth() - 4)
+            max_cols = max(1, min(lst.count(), usable // col_w))
+
+            def list_height(cols: int) -> int:
+                return -(-lst.count() // cols) * row_h + frame
+
+            content = self.centralWidget().widget()
+            others = content.sizeHint().height() - lst.height()  # everything on the page except the list
+            room = self.centralWidget().viewport().height()
+            cols = max_cols
+            for candidate in range(1, max_cols + 1):
+                if others + list_height(candidate) <= room:
+                    cols = candidate
+                    break
+            lst.setFixedHeight(list_height(cols))
+        finally:
+            self._fitting_std = False
 
     def _collect_high_clock_dtds(self, edid=None, remember: bool = True):
         edid = self.edid_bytes if edid is None else edid
@@ -2679,14 +2745,11 @@ class LinuxCRUWindow(QMainWindow):
                 sync_str = f"{preset} [{pol}]"
                 is_empty = False
             elif d["type"] == "range_limits":
-                res_str = (
-                    f"Range Limits: {d['v_min']}–{d['v_max']} Hz, {d['h_min']}–{d['h_max']} kHz, "
-                    f"up to {d['max_pclk']} MHz"
-                )
+                res_str = "Range Limits"
                 rate_str = hscan_str = clk_str = sync_str = ""
                 is_empty = True
             elif d["type"] == "monitor_name":
-                res_str = f"Monitor Name: {d['name']}"
+                res_str = f"Name: {d['name']}"
                 rate_str = hscan_str = clk_str = sync_str = ""
                 is_empty = True
             else:
@@ -2694,9 +2757,6 @@ class LinuxCRUWindow(QMainWindow):
                 rate_str = hscan_str = clk_str = sync_str = ""
                 is_empty = True
 
-            # A row that is not a timing has nothing for the other columns: its text spans the whole row
-            # instead of leaving a line of empty boxes.
-            self.table.setSpan(idx, 1, 1, 1 if d["type"] == "dtd" else 5)
             for c_idx, text in enumerate([slot_lbl, res_str, rate_str, hscan_str, clk_str, sync_str]):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2715,6 +2775,7 @@ class LinuxCRUWindow(QMainWindow):
         else:
             for idx, s in enumerate(active_std):
                 self.std_list.addItem(f"Slot {idx+1}:  {s['w']} × {s['h']} ({s['ar_name']}) @ {s['hz']} Hz")
+        self._fit_std_list()
 
     def new_blank_edid(self):
         port = self.current_port_info["port"]

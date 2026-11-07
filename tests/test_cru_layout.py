@@ -128,13 +128,116 @@ def test_rows_are_not_squeezed_after_the_main_window_restyles(cru, app, main_win
     assert dlg._content.height() >= dlg._content.minimumSizeHint().height()
 
 
-def test_the_standard_list_is_sized_to_its_eight_entries(main_window):
-    lst = main_window.std_list
-    main_window.resize(680, 900)
-    from PyQt6.QtWidgets import QApplication
+def std_columns(lst):
+    """How many entries sit in each visual column of the standard list."""
+    rects = [lst.visualItemRect(lst.item(i)) for i in range(lst.count())]
+    lefts = sorted({r.left() for r in rects})
+    return [sum(1 for r in rects if r.left() == left) for left in lefts]
 
-    QApplication.processEvents()
-    assert lst.height() <= (lst.fontMetrics().height() + 6) * 8 + 12
+
+def show_eight_standard(win, app):
+    win.edid_bytes[38:54] = b"\x01\x01" * 8
+    for i, w in enumerate((2048, 1920, 1600, 1152, 1024, 640, 800, 1280)):
+        win.edid_bytes[38 + 2 * i] = w // 8 - 31
+        win.edid_bytes[39 + 2 * i] = 0x40 | 25
+    win.std_slots = win.cru_decode_std(win.edid_bytes)
+    win.refresh_ui()
+    app.processEvents()
+
+
+@pytest.fixture
+def eight_standard(cru, main_window, app):
+    main_window.cru_decode_std = cru.decode_std_timings
+    show_eight_standard(main_window, app)
+    return main_window
+
+
+def test_a_tall_window_shows_the_eight_standard_resolutions_in_one_column(eight_standard, app):
+    win = eight_standard
+    win.resize(680, 1100)
+    app.processEvents()
+    assert std_columns(win.std_list) == [8]
+    assert win.std_list.verticalScrollBar().maximum() == 0
+
+
+@pytest.mark.parametrize("scale", SCALES)
+def test_a_short_window_spills_the_standard_list_to_the_right_not_into_a_scroll_bar(eight_standard, app, scale):
+    win = eight_standard
+    win.apply_ui_scale(scale, save=False)
+    width = round(680 * scale)  # text grows with the zoom, so the window must be wide enough for two columns
+    win.resize(width, round(1100 * scale))
+    app.processEvents()
+    tall = win.std_list.height()
+    win.resize(width, round(560 * scale))
+    app.processEvents()
+    cols = std_columns(win.std_list)
+    assert win.std_list.height() < tall, "the list gives its height back"
+    assert len(cols) >= 2 and sum(cols) == 8, f"entries did not move to the right: {cols}"
+    assert win.std_list.verticalScrollBar().maximum() == 0, "no scroll bar inside the list"
+    assert win.std_list.horizontalScrollBar().maximum() == 0
+    assert win.std_list.horizontalScrollBarPolicy() == win.std_list.verticalScrollBarPolicy()
+
+
+def test_columns_of_the_standard_list_never_overlap(eight_standard, app):
+    win = eight_standard
+    win.resize(680, 560)
+    app.processEvents()
+    rects = [win.std_list.visualItemRect(win.std_list.item(i)) for i in range(8)]
+    for i, a in enumerate(rects):
+        for b in rects[i + 1:]:
+            assert not a.intersects(b), (a, b)
+    fm = win.std_list.fontMetrics()
+    widest = max(fm.horizontalAdvance(win.std_list.item(i).text()) for i in range(8))
+    assert all(r.width() >= widest for r in rects)
+
+
+def test_the_standard_list_gets_taller_again_when_the_window_does(eight_standard, app):
+    win = eight_standard
+    win.resize(680, 560)
+    app.processEvents()
+    win.resize(680, 1100)
+    app.processEvents()
+    assert std_columns(win.std_list) == [8]
+
+
+def test_the_frequency_rows_are_three_aligned_columns(make_dialog, app):
+    """Radio | box | Actual, one row each: no 'Actual' row stacked between the boxes, same edges in every row."""
+    dlg = make_dialog()
+    for width in (500, 800):
+        dlg.resize(width, 700)
+        app.processEvents()
+        rows = ((dlg.rb_rate_v, dlg.refresh_sb, dlg.actual_vrate_lbl),
+                (dlg.rb_rate_h, dlg.hscan_sb, dlg.actual_hrate_lbl),
+                (dlg.rb_rate_pclk, dlg.pclk_sb, dlg.actual_pclk_lbl))
+        for radio, box, actual in rows:
+            assert dlg.fgrid.indexOf(radio) >= 0 and dlg.fgrid.indexOf(box) >= 0 and dlg.fgrid.indexOf(actual) >= 0
+            ry = radio.mapTo(dlg, radio.rect().center()).y()
+            assert box.mapTo(dlg, box.rect().center()).y() == pytest.approx(ry, abs=3), "box beside its radio"
+            assert actual.mapTo(dlg, actual.rect().center()).y() == pytest.approx(ry, abs=3), "actual beside its box"
+        lefts = {box.mapTo(dlg, box.rect().topLeft()).x() for _, box, _ in rows}
+        rights = {box.mapTo(dlg, box.rect().topRight()).x() for _, box, _ in rows}
+        actual_lefts = {a.mapTo(dlg, a.rect().topLeft()).x() for _, _, a in rows}
+        assert len(lefts) == 1 and len(rights) == 1, "the three boxes share their edges"
+        assert len(actual_lefts) == 1, "every 'Actual' label starts at the same x"
+        ys = [box.mapTo(dlg, box.rect().topLeft()).y() for _, box, _ in rows]
+        assert ys == sorted(ys) and ys[1] - ys[0] <= dlg.pclk_sb.height() + 8, "rows are evenly stacked"
+
+
+def test_the_refresh_box_is_in_the_frequency_group_not_the_top_block(make_dialog):
+    dlg = make_dialog()
+    assert dlg.fgrid.indexOf(dlg.refresh_sb) >= 0
+    assert dlg.top_grid.indexOf(dlg.refresh_sb) < 0
+
+
+def test_number_boxes_are_a_little_shorter_vertically(cru, app, scaled, make_dialog):
+    """1-2 px less padding top and bottom than the previous round (29 px at 100%)."""
+    scaled(1.0)
+    dlg = make_dialog()
+    assert dlg.hactive_sb.height() <= 27
+    assert dlg.hactive_sb.height() >= 22
+    sheet = cru.app_stylesheet(1.0)
+    block = sheet[sheet.index("QSpinBox, QDoubleSpinBox {"):].split("}")[0]
+    assert "padding: 1px 4px" in block, "vertical padding shrinks; horizontal padding stays"
 
 
 def test_number_boxes_fit_their_text_instead_of_stretching(cru, app, scaled, make_dialog):
@@ -188,18 +291,37 @@ def main_window(cru, app, tmp_path, monkeypatch, scaled):
     discard(app, win)
 
 
-def test_a_slot_without_a_timing_has_no_empty_boxes(main_window):
-    """An empty or descriptor slot is one line of text across the row, not a row of '-' or blank cells."""
+def test_a_slot_without_a_timing_has_blank_cells_but_keeps_every_column_bar(main_window):
+    """The text is cleared, the cells are not merged: merged cells would erase the bars between the columns."""
     win = main_window
     win.new_blank_edid()
-    for slot in (0, 1, 2):
-        assert win.table.columnSpan(slot, 1) == 5
+    for slot in range(4):
+        assert [win.table.columnSpan(slot, c) for c in range(6)] == [1] * 6, f"slot {slot + 1} has merged cells"
         assert [win.table.item(slot, c).text() for c in range(2, 6)] == ["", "", "", ""]
     assert win.table.item(0, 1).text() == "(Empty)"
-    assert win.table.columnSpan(3, 1) == 5
-    text = win.table.item(3, 1).text()
-    assert text.startswith("Range Limits:") and "30–200 Hz" in text and "700 MHz" in text
-    assert [win.table.item(3, c).text() for c in range(2, 6)] == ["", "", "", ""]
+    assert win.table.item(3, 1).text() == "Range Limits"
+
+
+def test_a_monitor_name_slot_is_a_label_with_blank_cells(main_window):
+    win = main_window
+    win.new_blank_edid()
+    win.edid_bytes[72:90] = bytes([0, 0, 0, 0xFC, 0]) + b"CRT Test\n    "
+    win.refresh_ui()
+    assert win.table.item(1, 1).text() == "Name: CRT Test"
+    assert [win.table.item(1, c).text() for c in range(2, 6)] == ["", "", "", ""]
+    assert win.table.columnSpan(1, 1) == 1
+
+
+def test_the_detailed_table_never_shows_a_scroll_bar(main_window, app):
+    for scale in (0.75, 1.0, 1.5):
+        main_window.apply_ui_scale(scale, save=False)
+        main_window.resize(680, 700)
+        app.processEvents()
+        bar = main_window.table.verticalScrollBar()
+        assert bar.maximum() == 0 and not bar.isVisible(), f"scroll bar at zoom {scale}"
+        assert main_window.table.height() >= main_window.table.horizontalHeader().height() + sum(
+            main_window.table.rowHeight(r) for r in range(4)
+        )
 
 
 def test_a_slot_with_a_timing_still_fills_every_column(cru, main_window):

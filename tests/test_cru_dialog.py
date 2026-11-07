@@ -59,10 +59,32 @@ def test_only_the_selected_radio_field_is_editable_in_each_group(app, make_dialo
     click_radio(app, dlg.rb_anchor_blank)
     assert [w.isEnabled() for w in (dlg.hback_sb, dlg.hblank_sb, dlg.htotal_sb)] == [False, True, False]
     assert [w.isEnabled() for w in (dlg.vback_sb, dlg.vblank_sb, dlg.vtotal_sb)] == [False, True, False]
+    # Refresh Rate is a real input whichever rate radio is selected; H-scan and pixel clock follow their radios.
     click_radio(app, dlg.rb_rate_v)
     assert [w.isEnabled() for w in (dlg.refresh_sb, dlg.hscan_sb, dlg.pclk_sb)] == [True, False, False]
+    click_radio(app, dlg.rb_rate_h)
+    assert [w.isEnabled() for w in (dlg.refresh_sb, dlg.hscan_sb, dlg.pclk_sb)] == [True, True, False]
     click_radio(app, dlg.rb_rate_pclk)
-    assert [w.isEnabled() for w in (dlg.refresh_sb, dlg.hscan_sb, dlg.pclk_sb)] == [False, False, True]
+    assert [w.isEnabled() for w in (dlg.refresh_sb, dlg.hscan_sb, dlg.pclk_sb)] == [True, False, True]
+
+
+def test_refresh_rate_can_be_typed_in_manual_whatever_radio_is_selected(app, make_dialog):
+    """Refresh is never auto-locked: typing it makes it the input, and pixel clock follows."""
+    dlg = make_dialog()
+    assert dlg.rb_rate_pclk.isChecked() and dlg.refresh_sb.isEnabled()
+    htot = dlg.hactive_sb.value() + dlg.hblank_sb.value()
+    vtot = dlg.vactive_sb.value() + dlg.vblank_sb.value()
+    type_into(app, dlg.refresh_sb, "90")
+    assert dlg.refresh_sb.value() == 90.0, "the typed refresh rate is kept, not recalculated"
+    assert dlg.rb_rate_v.isChecked()
+    assert dlg.pclk_sb.value() == pytest.approx(90 * htot * vtot / 1e6, abs=0.01)
+    assert not dlg.pclk_sb.isEnabled() and not dlg.hscan_sb.isEnabled()
+
+
+def test_refresh_rate_stays_editable_in_every_preset_except_native(make_dialog):
+    for preset in ("Manual", "Automatic CRT", "CVT Standard", "GTF Standard", "Exact"):
+        assert make_dialog(preset=preset).refresh_sb.isEnabled(), preset
+    assert not make_dialog(preset="Native PC").refresh_sb.isEnabled()
 
 
 def test_pixel_clock_is_the_default_input_so_editing_a_dtd_never_re_rounds_it(app, make_dialog):
@@ -160,5 +182,6 @@ def test_switch_to_manual_keeps_values_and_unlocks_the_selected_inputs(make_dial
     dlg.switch_to_manual_preserving_values()
     assert (dlg.htotal_sb.value(), dlg.vtotal_sb.value(), dlg.pclk_sb.value()) == before
     assert dlg.hback_sb.isEnabled() and not dlg.htotal_sb.isEnabled()
-    assert dlg.pclk_sb.isEnabled() and not dlg.refresh_sb.isEnabled()
+    assert dlg.pclk_sb.isEnabled() and dlg.refresh_sb.isEnabled()
+    assert not dlg.hscan_sb.isEnabled()
 
