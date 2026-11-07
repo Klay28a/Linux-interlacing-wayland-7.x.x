@@ -1185,6 +1185,50 @@ def app_stylesheet(scale: float) -> str:
 """
 
 
+class FixedRowsTable(QTableWidget):
+    """A table with a fixed, small number of rows that must ALL be visible, always.
+
+    It is exactly as tall as header + rows (measured from the real header, re-measured whenever the header's size
+    changes), never scrolls, and ignores the wheel so the page scrolls instead. Qt scrolls a table by itself when
+    a row is selected; with every row always visible that scroll would only hide the top slot, so it is disabled.
+    """
+
+    def __init__(self, rows: int, columns: int, parent: QWidget | None = None):
+        super().__init__(rows, columns, parent)
+        self._fitting = False
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.horizontalHeader().installEventFilter(self)
+
+    def scrollTo(self, index, hint=QAbstractItemView.ScrollHint.EnsureVisible):
+        """Never scroll: every row is already on screen."""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+    def eventFilter(self, obj, event):
+        if obj is self.horizontalHeader() and event.type() in (
+            QEvent.Type.Resize, QEvent.Type.LayoutRequest, QEvent.Type.StyleChange, QEvent.Type.FontChange,
+        ):
+            self.fit_height()
+        return super().eventFilter(obj, event)
+
+    def fit_height(self):
+        if self._fitting:
+            return
+        self._fitting = True
+        try:
+            header = self.horizontalHeader()
+            header_h = max(header.height(), header.sizeHint().height())
+            rows_h = sum(self.rowHeight(r) for r in range(self.rowCount()))
+            wanted = header_h + rows_h + 2 * self.frameWidth()
+            if self.height() != wanted or self.minimumHeight() != wanted:
+                self.setFixedHeight(wanted)
+            self.verticalScrollBar().setValue(0)
+        finally:
+            self._fitting = False
+
+
 class StandardResDialog(QDialog):
     def __init__(self, parent, initial=None):
         super().__init__(parent)
@@ -2333,7 +2377,7 @@ class LinuxCRUWindow(QMainWindow):
         dtd_group = QGroupBox("2. Detailed Resolutions (4 Slots — Double-Click to Edit)")
         dtd_layout = QVBoxLayout(dtd_group)
         dtd_layout.setSpacing(5)
-        self.table = QTableWidget(4, 6)
+        self.table = FixedRowsTable(4, 6)
         self.table.setHorizontalHeaderLabels([
             "Slot", "Resolution", "Refresh Rate", "H-Scan", "Pixel Clock", "Timing / Sync"
         ])
@@ -2345,8 +2389,6 @@ class LinuxCRUWindow(QMainWindow):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.table.doubleClicked.connect(self.edit_selected_dtd)
         dtd_layout.addWidget(self.table)
 
@@ -2416,6 +2458,7 @@ class LinuxCRUWindow(QMainWindow):
         for i, b in enumerate(self.bot_buttons):
             self.bot_btn_grid.addWidget(b, 0, i)
         layout.addWidget(bot_card)
+        layout.addStretch(1)  # extra window height becomes space at the bottom, not gaps inside the groups
 
         self._setup_zoom_shortcuts()
         self.apply_ui_scale(self.ui_scale, save=False)
@@ -2559,8 +2602,7 @@ class LinuxCRUWindow(QMainWindow):
         QApplication.instance().setStyleSheet(app_stylesheet(self.ui_scale))
         for r in range(4):
             self.table.setRowHeight(r, row_h)
-        header_h = self.table.horizontalHeader().sizeHint().height()
-        self.table.setFixedHeight(header_h + row_h * 4 + 2 * self.table.frameWidth())
+        self.table.fit_height()
         self._fit_std_list()
         self._reflow_responsive()
 
@@ -2582,6 +2624,7 @@ class LinuxCRUWindow(QMainWindow):
         content = scroll.widget() if scroll is not None else None
         if content is None or content.layout() is None:
             return
+        self.table.fit_height()
         probes = (self.table, self.std_list, *self.dtd_buttons, *self.std_buttons, *self.bot_buttons)
 
         def signature():

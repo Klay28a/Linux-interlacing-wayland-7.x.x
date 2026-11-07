@@ -291,6 +291,111 @@ def main_window(cru, app, tmp_path, monkeypatch, scaled):
     discard(app, win)
 
 
+def slots_visible(table):
+    """True when Slot 1's top and Slot 4's bottom are both inside the viewport."""
+    view = table.viewport().height()
+    return (
+        table.visualItemRect(table.item(0, 0)).top() >= 0
+        and table.visualItemRect(table.item(3, 0)).bottom() < view
+        and table.verticalScrollBar().value() == 0
+    )
+
+
+@pytest.mark.parametrize("scale", SCALES)
+def test_all_four_detailed_slots_stay_visible_whatever_is_selected_or_pressed(main_window, app, scale):
+    from PyQt6.QtCore import QPoint, QPointF, Qt
+    from PyQt6.QtGui import QWheelEvent
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication
+
+    win = main_window
+    win.apply_ui_scale(scale, save=False)
+    win.resize(round(680 * scale), round(900 * scale))
+    app.processEvents()
+    table = win.table
+    assert slots_visible(table)
+    for row in (2, 3, 1, 0, 3):
+        table.selectRow(row)
+        app.processEvents()
+        assert slots_visible(table), f"selecting slot {row + 1} hid a slot at zoom {scale}"
+    for key in (Qt.Key.Key_Down, Qt.Key.Key_Down, Qt.Key.Key_End, Qt.Key.Key_PageDown):
+        QTest.keyClick(table, key)
+        app.processEvents()
+        assert slots_visible(table), f"key {key} hid a slot"
+    wheel = QWheelEvent(QPointF(40, 40), QPointF(40, 40), QPoint(0, 0), QPoint(0, -120), Qt.MouseButton.NoButton,
+                        Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+    QApplication.sendEvent(table.viewport(), wheel)
+    app.processEvents()
+    assert slots_visible(table), "the mouse wheel scrolled the 4-row table"
+
+
+def test_the_table_regrows_when_its_header_gets_taller(main_window, app):
+    """A taller header (bigger font, another theme) must not push the last slot out of view."""
+    table = main_window.table
+    assert slots_visible(table)
+    table.horizontalHeader().setMinimumHeight(table.horizontalHeader().height() + 14)
+    app.processEvents()
+    app.processEvents()
+    assert slots_visible(table)
+    table.selectRow(3)
+    app.processEvents()
+    assert slots_visible(table), "selecting the last slot after the header grew scrolled Slot 1 away"
+    assert table.height() >= table.horizontalHeader().height() + sum(table.rowHeight(r) for r in range(4))
+
+
+def make_table_too_short(table):
+    """Force the situation Qt would scroll in: the viewport is shorter than the rows (fitting is paused)."""
+    table._fitting = True
+    table.setFixedHeight(table.height() - 30)
+    assert table.verticalScrollBar().maximum() > 0, "setup: the table must be scrollable for this test to mean anything"
+
+
+def test_selecting_a_slot_never_scrolls_the_table_even_when_it_could(main_window, app):
+    table = main_window.table
+    make_table_too_short(table)
+    for row in (3, 2, 3):
+        table.selectRow(row)
+        app.processEvents()
+        assert table.verticalScrollBar().value() == 0, f"selecting slot {row + 1} scrolled Slot 1 away"
+    assert table.visualItemRect(table.item(0, 0)).top() >= 0
+
+
+def test_the_wheel_never_scrolls_the_table_even_when_it_could(main_window, app):
+    from PyQt6.QtCore import QPoint, QPointF, Qt
+    from PyQt6.QtGui import QWheelEvent
+    from PyQt6.QtWidgets import QApplication
+
+    table = main_window.table
+    make_table_too_short(table)
+    wheel = QWheelEvent(QPointF(40, 40), QPointF(40, 40), QPoint(0, 0), QPoint(0, -120), Qt.MouseButton.NoButton,
+                        Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+    QApplication.sendEvent(table.viewport(), wheel)
+    app.processEvents()
+    assert table.verticalScrollBar().value() == 0
+
+
+def test_the_table_wheel_scrolls_the_page_not_the_table(main_window):
+    table = main_window.table
+    from PyQt6.QtCore import QPoint, QPointF, Qt
+    from PyQt6.QtGui import QWheelEvent
+
+    wheel = QWheelEvent(QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(0, -120), Qt.MouseButton.NoButton,
+                        Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+    table.wheelEvent(wheel)
+    assert not wheel.isAccepted(), "ignored, so the scroll area behind it gets the event"
+
+
+def test_a_tall_window_does_not_float_the_table_inside_its_group(main_window, app):
+    """Groups keep their natural height: extra window height becomes space at the bottom, not gaps in the groups."""
+    win = main_window
+    win.resize(680, 1000)
+    app.processEvents()
+    group = win.table.parentWidget()
+    assert group.height() == group.sizeHint().height()
+    assert win.table.geometry().top() < 45, "the table sits right under the group title"
+    assert win.dtd_buttons[0].geometry().top() - win.table.geometry().bottom() < 16, "buttons sit right under the table"
+
+
 def test_a_slot_without_a_timing_has_blank_cells_but_keeps_every_column_bar(main_window):
     """The text is cleared, the cells are not merged: merged cells would erase the bars between the columns."""
     win = main_window
