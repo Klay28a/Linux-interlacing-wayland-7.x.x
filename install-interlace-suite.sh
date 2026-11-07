@@ -16,6 +16,8 @@ FILES=(
     interlace_runner.py interlace_gpu.py interlace_edid.py interlace_cmdline.py interlace_boot.py
     interlace_rules.py interlace_state.py interlace_setup.py interlace_apply_rules.py
     interlace_pkgbuild.py interlace_rdna_patch.py interlace_apply_edid.py
+    interlace_kernel.py interlace_manifest.py interlace_patches.py interlace_gui_tasks.py
+    interlace_selection.py interlace_sysinfo.py interlace_verify.py
 )
 
 usage() {
@@ -53,6 +55,15 @@ else
     SUDO=(sudo -n)
 fi
 
+# install(1) refuses to copy a file onto itself (this script can run from the installed directory).
+install_unless_same() {
+    local src="$1" dest="$2"
+    if [ -e "$dest" ] && [ "$src" -ef "$dest" ]; then
+        return 0
+    fi
+    run install -m 0755 "$src" "$dest"
+}
+
 install_python_qt() {
     if python3 -c "import PyQt6" >/dev/null 2>&1; then
         echo "  -> Python 3 & PyQt6 are already installed."
@@ -78,18 +89,22 @@ echo "==> [2/3] Installing Linux Interlacing Suite files to $SUITE_SHARE_USER...
 run mkdir -p "$SUITE_SHARE_USER" "$HOME/.local/bin"
 for f in "${FILES[@]}"; do
     if [ -f "$SCRIPT_DIR/$f" ]; then
-        run install -m 0755 "$SCRIPT_DIR/$f" "$SUITE_SHARE_USER/$f"
+        install_unless_same "$SCRIPT_DIR/$f" "$SUITE_SHARE_USER/$f"
     else
         echo "  -> Skipping missing file: $f"
     fi
 done
-run install -m 0755 "$SUITE_SHARE_USER/linux-interlace-suite.py" "$SUITE_BIN_USER"
+install_unless_same "$SUITE_SHARE_USER/linux-interlace-suite.py" "$SUITE_BIN_USER"
 
 if [ "$SYSTEM" -eq 1 ]; then
     echo "  -> --system: installing to /usr/local (sudo)..."
     run "${SUDO[@]}" install -d /usr/local/share/linux-interlace-suite /usr/local/bin
     for f in "${FILES[@]}"; do
-        [ -f "$SCRIPT_DIR/$f" ] && run "${SUDO[@]}" install -m 0755 "$SCRIPT_DIR/$f" "/usr/local/share/linux-interlace-suite/$f"
+        [ -f "$SCRIPT_DIR/$f" ] || continue
+        if [ -e "/usr/local/share/linux-interlace-suite/$f" ] && [ "$SCRIPT_DIR/$f" -ef "/usr/local/share/linux-interlace-suite/$f" ]; then
+            continue
+        fi
+        run "${SUDO[@]}" install -m 0755 "$SCRIPT_DIR/$f" "/usr/local/share/linux-interlace-suite/$f"
     done
     run "${SUDO[@]}" install -m 0755 "$SCRIPT_DIR/linux-interlace-suite.py" /usr/local/bin/linux-interlace-suite
 fi

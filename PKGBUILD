@@ -32,10 +32,18 @@ source=(
     'interlace_pkgbuild.py'
     'interlace_rdna_patch.py'
     'interlace_apply_edid.py'
+    'interlace_kernel.py'
+    'interlace_manifest.py'
+    'interlace_patches.py'
+    'interlace_gui_tasks.py'
+    'interlace_selection.py'
+    'interlace_sysinfo.py'
+    'interlace_verify.py'
     'linux_cru.py'
 )
 sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
-            'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+            'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
+            'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 # NOTE: keep one entry per source above (verified by tests/test_packaging.py).
 
 package() {
@@ -52,7 +60,9 @@ package() {
     local mod
     for mod in interlace_runner interlace_gpu interlace_edid interlace_cmdline interlace_boot \
                interlace_rules interlace_state interlace_setup interlace_apply_rules \
-               interlace_pkgbuild interlace_rdna_patch interlace_apply_edid; do
+               interlace_pkgbuild interlace_rdna_patch interlace_apply_edid \
+               interlace_kernel interlace_manifest interlace_patches interlace_gui_tasks \
+               interlace_selection interlace_sysinfo interlace_verify; do
         install -Dm644 "$srcdir/$mod.py" "$pkgdir/usr/share/linux-interlace-suite/$mod.py"
     done
 

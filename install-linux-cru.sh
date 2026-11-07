@@ -11,6 +11,10 @@ APP_SRC="$SCRIPT_DIR/linux_cru.py"
 SUPPORT_FILES=(
     interlace_apply_edid.py interlace_boot.py interlace_cmdline.py interlace_edid.py interlace_gpu.py
     interlace_rules.py interlace_runner.py interlace_setup.py interlace_state.py
+    interlace_apply_rules.py interlace_pkgbuild.py interlace_rdna_patch.py interlace_kernel.py
+    interlace_manifest.py interlace_patches.py interlace_gui_tasks.py interlace_selection.py
+    interlace_sysinfo.py interlace_verify.py setup-interlace-env.sh fix-interlaced-kernel.sh install-linux-cru.sh
+    install-interlace-suite.sh 11_linux_rdna_dp_hdmi_interlace.patch linux-interlace-suite.py linux_cru.py
 )
 SUPPORT_USER="$HOME/.local/share/linux-interlace-suite"
 SUPPORT_SYSTEM="/usr/local/share/linux-interlace-suite"
@@ -45,6 +49,16 @@ else
     SUDO=(sudo -n)
 fi
 
+# install(1) refuses to copy a file onto itself. That is exactly the case when the suite's own button runs
+# this script from the installed directory, so a copy is skipped when source and destination are one file.
+install_unless_same() {
+    local src="$1" dest="$2"
+    if [ -e "$dest" ] && [ "$src" -ef "$dest" ]; then
+        return 0
+    fi
+    run install -m 0755 "$src" "$dest"
+}
+
 if [ ! -f "$APP_SRC" ]; then
     echo "ERROR: $APP_SRC not found (run this script from the project directory)." >&2
     exit 1
@@ -75,12 +89,15 @@ for f in "${SUPPORT_FILES[@]}"; do
         echo "ERROR: $SCRIPT_DIR/$f not found (needed by the Apply buttons)." >&2
         exit 1
     fi
-    run install -m 0755 "$SCRIPT_DIR/$f" "$SUPPORT_USER/$f"
+    install_unless_same "$SCRIPT_DIR/$f" "$SUPPORT_USER/$f"
 done
 if [ "$SYSTEM" -eq 1 ]; then
     run "${SUDO[@]}" install -m 0755 "$APP_SRC" /usr/local/bin/linux-cru
     run "${SUDO[@]}" install -d "$SUPPORT_SYSTEM"
     for f in "${SUPPORT_FILES[@]}"; do
+        if [ -e "$SUPPORT_SYSTEM/$f" ] && [ "$SCRIPT_DIR/$f" -ef "$SUPPORT_SYSTEM/$f" ]; then
+            continue
+        fi
         run "${SUDO[@]}" install -m 0755 "$SCRIPT_DIR/$f" "$SUPPORT_SYSTEM/$f"
     done
 fi
