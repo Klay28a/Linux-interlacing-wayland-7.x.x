@@ -81,6 +81,13 @@ def input_byte(adapter_mode: str, conn_name: str) -> int:
     return 0xA5 if (adapter_mode == "dp-dac" or conn_name.startswith("DP-")) else 0xA2
 
 
+def adapter_from_edid(data: bytes) -> str:
+    """The adapter mode an EDID is written for, read from its video input byte (20): the inverse of ``input_byte``."""
+    if len(data) < 21 or not data[20] & 0x80:
+        return "analog-native"
+    return "dp-dac" if data[20] & 0x0F == 5 else "hdmi-dac"
+
+
 def patch_edid(
     src: bytes | None, adapter_mode: str, gpu_profile: str, conn_name: str, src_label: str = "<edid>",
 ) -> tuple[bytes, list[str]]:

@@ -14,8 +14,10 @@ prints every write/command instead of performing it.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -24,7 +26,7 @@ from interlace_boot import (
     rebuild_initramfs,
     update_bootloaders,
 )
-from interlace_edid import EDID_HEADER
+from interlace_edid import EDID_HEADER, adapter_from_edid
 from interlace_gpu import (
     GPU_PROFILES,
     edid_file_name,
@@ -34,6 +36,7 @@ from interlace_gpu import (
 )
 from interlace_runner import CommandError, Host, Runner
 from interlace_setup import live_reload
+from interlace_state import update_state
 
 _CONN_RE = re.compile(r"[A-Za-z0-9_.-]+")
 _REL_FW_RE = re.compile(r"edid/[A-Za-z0-9_.-]+\.bin")
@@ -91,17 +94,39 @@ def apply_edid(args: argparse.Namespace, host: Host) -> int:
     write_debugfs_override(host, conn, data)
     live_reload(host, conn, rel_fw)
 
+    gpus = parse_lspci(_lspci(host))
+    profile = resolve_gpu_profile(args.gpu_profile, gpus, [c.name for c in list_connectors(paths.drm_class)])
     if args.boot:
-        gpus = parse_lspci(_lspci(host))
-        profile = resolve_gpu_profile(args.gpu_profile, gpus, [c.name for c in list_connectors(paths.drm_class)])
         runner.say("==> Embedding EDID in initramfs and updating bootloader...")
         embedded = embed_edid_in_initramfs(host, dest)
         runner.say(f"  -> Initramfs configs updated: {', '.join(embedded) or 'none found'}")
         updated = update_bootloaders(host, conn, rel_fw, profile)
         runner.say(f"  -> Bootloader configs updated: {', '.join(updated) or 'none found'}")
         rebuild_initramfs(host)
+    record_state(host, args, conn, rel_fw, data, profile)
     runner.say(f"==> Done: {conn} -> {rel_fw}{' (boot persistent)' if args.boot else ' (live only)'}")
     return 0
+
+
+def record_state(host: Host, args: argparse.Namespace, conn: str, rel_fw: str, data: bytes, resolved: str) -> None:
+    """Tell the suite (its EDID badge reads this file) which EDID is installed for ``conn``.
+
+    The adapter is read from the EDID itself, so the record matches what was really installed. The GPU profile
+    stays whatever the suite last applied unless one was given explicitly: Linux CRU must not change it.
+    """
+    runner, paths = host.runner, host.paths
+    existing = runner.read_text(paths.state_file)
+    profile = args.gpu_profile
+    if profile == "auto":
+        try:
+            recorded = json.loads(existing).get("gpu_profile") if existing.strip() else None
+        except (ValueError, AttributeError):
+            recorded = None
+        profile = recorded if recorded in GPU_PROFILES and recorded != "auto" else resolved
+    state = update_state(
+        existing, conn, rel_fw, profile, adapter_from_edid(data), str(args.edid), not args.boot, int(time.time()),
+    )
+    runner.write_text(paths.state_file, state)
 
 
 def _lspci(host: Host) -> str:

@@ -45,6 +45,43 @@ def test_boot_flag_updates_bootloader_and_initramfs(sandbox, edid_file):
     assert ["sudo", "-n", "mkinitcpio", "-P"] in runner.executed
 
 
+def test_apply_records_the_connector_in_the_suite_state(sandbox, edid_file):
+    """Without this the suite's EDID badge never learns that Linux CRU installed something."""
+    import json
+
+    _, paths = sandbox
+    host, runner = _host(sandbox)
+    assert interlace_apply_edid.main([str(edid_file), "--connector", "DP-1", "--boot"], host=host) == 0
+    record = json.loads(runner.installed[str(paths.state_file)].decode())["connectors"]["DP-1"]
+    assert record["edid_file"] == "edid/cru-dp-1.bin"
+    assert record["adapter_mode"] == "dp-dac"
+    assert record["live_only"] is False
+    assert record["source_edid"] == str(edid_file)
+
+
+def test_live_apply_is_recorded_as_live_only(sandbox, edid_file):
+    import json
+
+    _, paths = sandbox
+    host, runner = _host(sandbox)
+    assert interlace_apply_edid.main([str(edid_file), "--connector", "DP-1"], host=host) == 0
+    assert json.loads(runner.installed[str(paths.state_file)].decode())["connectors"]["DP-1"]["live_only"] is True
+
+
+def test_apply_keeps_the_adapter_the_user_chose_in_the_suite(sandbox, edid_file):
+    import json
+
+    _, paths = sandbox
+    paths.state_file.parent.mkdir(parents=True)
+    paths.state_file.write_text(json.dumps({"adapter_mode": "dp-dac", "gpu_profile": "gcn-single", "connectors": {
+        "VGA-1": {"edid_file": "edid/crufile.bin", "adapter_mode": "dp-dac"}}}))
+    host, runner = _host(sandbox)
+    assert interlace_apply_edid.main([str(edid_file), "--connector", "DP-1"], host=host) == 0
+    data = json.loads(runner.installed[str(paths.state_file)].decode())
+    assert data["connectors"]["DP-1"]["adapter_mode"] == "dp-dac"
+    assert "VGA-1" in data["connectors"], "other ports' records survive"
+
+
 def test_debugfs_override_written_when_node_exists(sandbox, edid_file):
     _, paths = sandbox
     node = paths.debugfs_dri / "0" / "DP-1" / "edid_override"
