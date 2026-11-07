@@ -29,12 +29,53 @@ class PkgbuildError(Exception):
     """A user-facing failure (printed without a traceback)."""
 
 
+NI_BEGIN = "# --- Linux CRT suite: never prompt; relax -Werror in host tools ---"
+NI_END = "# --- end Linux CRT suite ---"
+# Host tools the kernel builds during ``make prepare``; they are compiled with a bare -Werror that
+# modern GCC (C23: const-preserving strchr) turns into a hard failure on the 6.x LTS sources.
+HOST_TOOL_DIRS = "tools/lib/bpf tools/lib/subcmd tools/lib/api tools/objtool tools/bpf/resolve_btfids"
+_PREPARE_RE = re.compile(
+    r'^(?P<indent>[ \t]*)make (?P<flags>"\$\{BUILD_FLAGS\[@\]\}"|\$\{BUILD_FLAGS\[\*\]\}) prepare[ \t]*$',
+    re.MULTILINE,
+)
+
+
+def noninteractive_block(indent: str, flags: str) -> str:
+    """Shell lines that make ``prepare()`` unable to block and keep host-tool builds from failing.
+
+    ``exec < /dev/null`` means a stray prompt fails fast instead of hanging; ``olddefconfig`` resolves
+    every ``(NEW)`` Kconfig symbol to its default *before* ``make prepare`` (whose ``syncconfig`` is
+    what actually prompted); the ``sed`` drops a bare ``-Werror`` (``-Werror=foo`` is left alone).
+    """
+    sed = r"""sed -i -E 's/(^|[[:space:]])-Werror([[:space:]]|$)/\1\2/g'"""
+    lines = [
+        NI_BEGIN,
+        "exec < /dev/null",
+        f"find {HOST_TOOL_DIRS} -name 'Makefile*' -type f -exec {sed} {{}} + 2>/dev/null || true",
+        f"make {flags} olddefconfig >/dev/null",
+        NI_END,
+    ]
+    return "".join(f"{indent}{line}\n" for line in lines)
+
+
+def make_noninteractive(txt: str) -> str:
+    """Insert ``noninteractive_block`` right before the PKGBUILD's ``make ... prepare`` (no-op if absent)."""
+    match = _PREPARE_RE.search(txt)
+    if match is None:
+        return txt
+    return txt[: match.start()] + noninteractive_block(match["indent"], match["flags"]) + txt[match.start() :]
+
+
 def strip_previous(txt: str) -> str:
     """Remove a block this tool added earlier, so re-running never duplicates sources/hooks/checksums.
 
-    Exactly reverses ``add_patches`` (patch block, RDNA hook and trailing ``b2sums+=``); text this tool
-    did not write is left alone.
+    Exactly reverses ``add_patches`` (patch block, RDNA hook and trailing ``b2sums+=``) and
+    ``make_noninteractive``; text this tool did not write is left alone.
     """
+    txt = re.sub(
+        r"^[ \t]*" + re.escape(NI_BEGIN) + r"\n.*?^[ \t]*" + re.escape(NI_END) + r"\n", "", txt,
+        flags=re.MULTILINE | re.DOTALL,
+    )
     if BLOCK_MARKER not in txt:
         return txt
     txt = re.sub(
@@ -45,8 +86,18 @@ def strip_previous(txt: str) -> str:
 
 
 def set_default(txt: str, var: str, value: str) -> str:
-    """Rewrite the ``: "${var:=old}"`` default of a PKGBUILD variable to ``value``."""
-    return re.sub(r': "\$\{' + re.escape(var) + r':=[^}]*\}"', lambda _m: f': "${{{var}:={value}}}"', txt)
+    """Rewrite a PKGBUILD variable's default to ``value``. Handles both CachyOS styles.
+
+    Modern PKGBUILDs use ``: "${var:=old}"``. Older ones (6.1, 6.6) use ``var=${var-old}`` where ANY
+    non-empty value means "on", so ``no`` becomes empty and ``yes`` becomes ``y`` there.
+    """
+    name = re.escape(var)
+    txt = re.sub(r': "\$\{' + name + r':=[^}]*\}"', lambda _m: f': "${{{var}:={value}}}"', txt)
+    legacy = {"no": "", "yes": "y"}.get(value, value)
+    return re.sub(
+        r"^" + name + r"=\$\{" + name + r"-[^}]*\}", lambda _m: f"{var}=${{{var}-{legacy}}}", txt,
+        flags=re.MULTILINE,
+    )
 
 
 def relax_constraints(txt: str) -> str:
@@ -86,6 +137,7 @@ def transform(
     for var, value in defaults.items():
         txt = set_default(txt, var, value)
     txt = relax_constraints(txt)
+    txt = make_noninteractive(txt)
     return add_patches(txt, patches, sums, include_rdna)
 
 

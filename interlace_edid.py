@@ -67,6 +67,20 @@ def _fix_interlaced_dtd(b: bytearray, off: int, rdna_or_dcn: bool, log: list[str
         b[off + 11] = (b[off + 11] & 0xF0) | (((voff >> 4) & 0x03) << 2) | ((vsyn >> 4) & 0x03)
 
 
+DIGITAL_PREFIXES = ("DP-", "HDMI-", "DVI-D-", "eDP-")
+
+
+def is_digital_output(adapter_mode: str, conn_name: str) -> bool:
+    return adapter_mode in ("dp-dac", "hdmi-dac") or conn_name.startswith(DIGITAL_PREFIXES)
+
+
+def input_byte(adapter_mode: str, conn_name: str) -> int:
+    """EDID byte 20 (video input definition) a given adapter/connector needs: DP 0xA5, HDMI 0xA2, analog 0x0E."""
+    if not is_digital_output(adapter_mode, conn_name):
+        return 0x0E
+    return 0xA5 if (adapter_mode == "dp-dac" or conn_name.startswith("DP-")) else 0xA2
+
+
 def patch_edid(
     src: bytes | None, adapter_mode: str, gpu_profile: str, conn_name: str, src_label: str = "<edid>",
 ) -> tuple[bytes, list[str]]:
@@ -76,7 +90,7 @@ def patch_edid(
     Raises ``ValueError`` on an invalid EDID header.
     """
     log: list[str] = []
-    is_digital = adapter_mode in ("dp-dac", "hdmi-dac") or conn_name.startswith(("DP-", "HDMI-", "DVI-D-", "eDP-"))
+    is_digital = is_digital_output(adapter_mode, conn_name)
     rdna_or_dcn = gpu_profile == "rdna-single" or is_digital
 
     if src is not None and len(src) >= 128:
@@ -92,7 +106,7 @@ def patch_edid(
         b[18] = 1
         b[19] = 4
         # EDID 1.4 digital input: 8bpc, DisplayPort (0xA5) or HDMI-A (0xA2)
-        b[20] = 0xA5 if (adapter_mode == "dp-dac" or conn_name.startswith("DP-")) else 0xA2
+        b[20] = input_byte(adapter_mode, conn_name)
         b[24] = (b[24] & 0xE7) | 0x02 | 0x01
         log.append(
             f"  -> Configured EDID header for Digital DAC Adapter ({adapter_mode} on {conn_name}: "

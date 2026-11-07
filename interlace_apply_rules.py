@@ -17,12 +17,32 @@ from collections.abc import Sequence
 from interlace_boot import rebuild_initramfs, sync_boot
 from interlace_gpu import (
     GPU_PROFILES,
+    GpuDevice,
     list_connectors,
     parse_lspci,
     resolve_gpu_profile,
 )
 from interlace_rules import apply_gpu_rules, render_gpu_rules
 from interlace_runner import CommandError, Host, Runner
+
+
+def resolve_profile(host: Host, requested: str) -> tuple[str, list[GpuDevice]]:
+    """Resolve ``requested`` (possibly ``auto``) to a concrete GPU profile using lspci + DRM connectors."""
+    res = host.runner.query(["lspci", "-D", "-nn"], ok_to_fail=True)
+    gpus = parse_lspci(res.stdout if res.returncode == 0 else "")
+    connectors = [c.name for c in list_connectors(host.paths.drm_class)]
+    return resolve_gpu_profile(requested, gpus, connectors), gpus
+
+
+def apply_profile(
+    host: Host, profile: str, gpus: Sequence[GpuDevice], *, desktop_env: bool = True, initramfs: bool = True,
+) -> None:
+    """Write the udev/modprobe/environment.d rules for ``profile`` and optionally rebuild the initramfs."""
+    host.runner.say(f"==> Applying GPU architecture rules for profile: {profile}")
+    plan = render_gpu_rules(profile, gpus, host.paths, host.exists, desktop_env=desktop_env)
+    apply_gpu_rules(host, plan)
+    if initramfs:
+        rebuild_initramfs(host)
 
 
 def main(argv: Sequence[str] | None = None, host: Host | None = None) -> int:
@@ -36,10 +56,7 @@ def main(argv: Sequence[str] | None = None, host: Host | None = None) -> int:
     args = p.parse_args(argv)
 
     host = host or Host(runner=Runner(dry_run=args.dry_run))
-    res = host.runner.query(["lspci", "-D", "-nn"], ok_to_fail=True)
-    gpus = parse_lspci(res.stdout if res.returncode == 0 else "")
-    connectors = [c.name for c in list_connectors(host.paths.drm_class)]
-    profile = resolve_gpu_profile(args.gpu_profile, gpus, connectors)
+    profile, gpus = resolve_profile(host, args.gpu_profile)
 
     if args.print_profile:
         print(profile)
@@ -56,12 +73,8 @@ def main(argv: Sequence[str] | None = None, host: Host | None = None) -> int:
             return 3
         return 0
 
-    host.runner.say(f"==> Applying GPU architecture rules for profile: {profile}")
-    plan = render_gpu_rules(profile, gpus, host.paths, host.exists, desktop_env=not args.no_desktop_env)
     try:
-        apply_gpu_rules(host, plan)
-        if not args.no_initramfs:
-            rebuild_initramfs(host)
+        apply_profile(host, profile, gpus, desktop_env=not args.no_desktop_env, initramfs=not args.no_initramfs)
     except CommandError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 3

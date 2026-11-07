@@ -46,11 +46,19 @@ class SystemPaths:
         Path("/boot/loader/entries"), Path("/efi/loader/entries"), Path("/boot/efi/loader/entries"),
     )
     grub_cfg_candidates: tuple[Path, ...] = (Path("/boot/grub/grub.cfg"), Path("/boot/grub2/grub.cfg"))
+    proc_cmdline: Path = Path("/proc/cmdline")
+    modules_dir: Path = Path("/usr/lib/modules")
+    system_bin_dirs: tuple[Path, ...] = (Path("/usr/local/bin"), Path("/usr/bin"))
     home: Path = field(default_factory=Path.home)
 
     @property
     def state_file(self) -> Path:
         return self.firmware_edid_dir / ".interlace-suite-state.json"
+
+    @property
+    def kernel_state_file(self) -> Path:
+        """Written (as the user) after a kernel build so the GUI can verify the running kernel."""
+        return self.home / ".local" / "state" / "linux-interlace-suite" / "kernel-build.json"
 
     @property
     def user_env_dir(self) -> Path:
@@ -93,11 +101,22 @@ class Runner:
 
     def _exec(
         self, cmd: Sequence[str], ok_to_fail: bool, input_text: str | None = None,
+        *, stream: bool = False, cwd: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        """The only place a subprocess is created; tests override this to record/mock commands."""
+        """The only place a subprocess is created; tests override this to record/mock commands.
+
+        ``stream=True`` lets the child write straight to our stdout/stderr (long builds such as
+        ``makepkg`` must show progress live instead of after they finish).
+        """
         argv = [str(c) for c in cmd]
+        # A child must never inherit our stdin: when the GUI starts us, that is an open pipe and any
+        # prompt (kernel Kconfig "(NEW)" questions, a y/n) would block forever with nobody to answer.
+        stdin = None if input_text is not None else subprocess.DEVNULL
         try:
-            return subprocess.run(argv, check=True, text=True, capture_output=True, input=input_text)
+            return subprocess.run(
+                argv, check=True, text=True, capture_output=not stream, input=input_text, cwd=cwd,
+                stdin=stdin,
+            )
         except subprocess.CalledProcessError as exc:
             if not ok_to_fail:
                 detail = (exc.stderr or exc.stdout or "").strip().splitlines()
@@ -124,21 +143,24 @@ class Runner:
             return ["sudo", *argv]
         return ["sudo", "-n", *argv]
 
-    def query(self, cmd: Sequence[str], *, ok_to_fail: bool = False) -> subprocess.CompletedProcess[str]:
+    def query(
+        self, cmd: Sequence[str], *, ok_to_fail: bool = False, cwd: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         """Run a READ-ONLY command. Always executes, even in dry-run mode."""
-        return self._exec(cmd, ok_to_fail)
+        return self._exec(cmd, ok_to_fail, cwd=cwd)
 
     def run(
         self, cmd: Sequence[str], *, ok_to_fail: bool = False, privileged: bool = False,
+        cwd: Path | None = None, stream: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         """Run a state-changing command (printed instead of executed in dry-run mode)."""
         argv = self.sudo(cmd) if privileged else [str(c) for c in cmd]
         if self.dry_run:
-            self.plan("would run: " + shlex.join(argv))
+            self.plan("would run: " + shlex.join(argv) + (f" (in {cwd})" if cwd else ""))
             return subprocess.CompletedProcess(argv, 0, "", "")
-        result = self._exec(argv, ok_to_fail)
-        for stream in (result.stdout, result.stderr):
-            for line in (stream or "").splitlines():
+        result = self._exec(argv, ok_to_fail, stream=stream, cwd=cwd)
+        for text in (result.stdout, result.stderr):
+            for line in (text or "").splitlines():
                 self.say(line)
         return result
 
@@ -189,6 +211,25 @@ class Runner:
                 self.say(f"[dry-run]   | {line}")
             return
         self._install(path, content.encode("utf-8"), mode, privileged)
+
+    def makedirs(self, path: Path) -> None:
+        if self.dry_run:
+            self.plan(f"would create directory {path}")
+            return
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise CommandError(f"cannot create directory {path}: {exc}") from exc
+
+    def copy_file(self, src: Path, dst: Path) -> None:
+        """Copy a regular file (no subprocess, so it behaves identically on every distro)."""
+        if self.dry_run:
+            self.plan(f"would copy {src} -> {dst}")
+            return
+        try:
+            shutil.copy2(src, dst)
+        except OSError as exc:
+            raise CommandError(f"cannot copy {src} to {dst}: {exc}") from exc
 
     def backup_once(self, path: Path) -> None:
         """Copy ``path`` to ``path.orig.bak`` unless that backup already exists."""
